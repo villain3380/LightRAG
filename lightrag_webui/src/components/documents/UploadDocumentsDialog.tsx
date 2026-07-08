@@ -10,6 +10,7 @@ import {
   DialogTrigger
 } from '@/components/ui/Dialog'
 import FileUploader from '@/components/ui/FileUploader'
+import Checkbox from '@/components/ui/Checkbox'
 import { toast } from 'sonner'
 import { supportedFileTypes } from '@/lib/constants'
 import {
@@ -67,6 +68,10 @@ export default function UploadDocumentsDialog({
       })
     return () => controller.abort()
   }, [open])
+
+  // KG extraction on/off for this batch. true (default) = dense_sparse+KG;
+  // false = dense_sparse only (skip entity/relation extraction).
+  const [extractKg, setExtractKg] = useState(true)
 
   const handleRejectedFiles = useCallback(
     (rejectedFiles: FileRejection[]) => {
@@ -142,7 +147,7 @@ export default function UploadDocumentsDialog({
                 ...pre,
                 [file.name]: percentCompleted
               }))
-            })
+            }, !extractKg)
 
             if (result.status !== 'success') {
               uploadErrors[file.name] = result.message
@@ -231,7 +236,7 @@ export default function UploadDocumentsDialog({
         setIsUploading(false)
       }
     },
-    [setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded, onUploadBatchAccepted]
+    [setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded, onUploadBatchAccepted, extractKg]
   )
 
   const uploaderInputs = deriveUploaderInputs(fileTypes)
@@ -268,6 +273,16 @@ export default function UploadDocumentsDialog({
             {t('documentPanel.uploadDocuments.description')}
           </DialogDescription>
         </DialogHeader>
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="extract_kg"
+            checked={extractKg}
+            onCheckedChange={(checked) => setExtractKg(checked === true)}
+          />
+          <label htmlFor="extract_kg" className="text-sm cursor-pointer">
+            {t('documentPanel.uploadDocuments.extractKg')}
+          </label>
+        </div>
         <FileUploader
           maxFileCount={Infinity}
           maxSize={200 * 1024 * 1024}

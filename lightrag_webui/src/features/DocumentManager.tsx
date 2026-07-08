@@ -394,6 +394,7 @@ export default function DocumentManager() {
   }, []);
 
   const [showPipelineStatus, setShowPipelineStatus] = useState(false)
+  const [chunkInspectorDoc, setChunkInspectorDoc] = useState<DocStatusResponse | null>(null)
   const { t, i18n } = useTranslation()
   const health = useBackendState.use.health()
   const pipelineActive = useBackendState.use.pipelineActive()
@@ -1449,6 +1450,12 @@ export default function DocumentManager() {
               open={showPipelineStatus}
               onOpenChange={setShowPipelineStatus}
             />
+            {chunkInspectorDoc && (
+              <ChunkInspector
+                doc={chunkInspectorDoc}
+                onClose={() => setChunkInspectorDoc(null)}
+              />
+            )}
           </div>
         </div>
 
@@ -1690,7 +1697,22 @@ export default function DocumentManager() {
                               </div>
                             </TableCell>
                             <TableCell>{doc.content_length ?? '-'}</TableCell>
-                            <TableCell>{doc.chunks_count ?? '-'}</TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-1">
+                                <span>{doc.chunks_count ?? '-'}</span>
+                                {doc.chunks_count ? (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-6 w-6"
+                                    onClick={() => setChunkInspectorDoc(doc)}
+                                    title={t('documentPanel.chunkInspector.open')}
+                                  >
+                                    <EyeIcon className="h-4 w-4" />
+                                  </Button>
+                                ) : null}
+                              </div>
+                            </TableCell>
                             <TableCell className="truncate">
                               {new Date(doc.created_at).toLocaleString()}
                             </TableCell>

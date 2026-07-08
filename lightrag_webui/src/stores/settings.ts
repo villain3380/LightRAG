@@ -121,6 +121,8 @@ const useSettingsStoreBase = create<SettingsState>()(
         mode: 'mix',
         top_k: 40,
         chunk_top_k: 20,
+        dense_weight: 0.5,
+        sparse_weight: 0.5,
         max_entity_tokens: 6000,
         max_relation_tokens: 8000,
         max_total_tokens: 30000,
@@ -229,7 +231,7 @@ const useSettingsStoreBase = create<SettingsState>()(
     {
       name: 'settings-storage',
       storage: createJSONStorage(() => localStorage),
-      version: 20,
+      version: 21,
       migrate: (state: any, version: number) => {
         if (version < 2) {
           state.showEdgeLabel = false
@@ -341,6 +343,17 @@ const useSettingsStoreBase = create<SettingsState>()(
             ...existing,
             ...suggestedUserPrompts.filter((p: string) => !existing.includes(p))
           ]
+        }
+        if (version < 21) {
+          // Add dense/sparse hybrid retrieval weights (default 0.5/0.5)
+          if (state.querySettings) {
+            if (state.querySettings.dense_weight === undefined) {
+              state.querySettings.dense_weight = 0.5
+            }
+            if (state.querySettings.sparse_weight === undefined) {
+              state.querySettings.sparse_weight = 0.5
+            }
+          }
         }
         return state
       }

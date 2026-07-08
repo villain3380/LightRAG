@@ -52,6 +52,23 @@ class QueryRequest(BaseModel):
         description="Number of text chunks to retrieve initially from vector search and keep after reranking.",
     )
 
+    dense_weight: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Weight for the dense vector in hybrid (dense+sparse) chunk retrieval. "
+        "Only applies when chunk_retrieval_mode='dense_sparse'. "
+        "Examples: 1.0 with sparse_weight=0.0 = dense-only; 0.5 = balanced; 0.7 = dense-favoring. "
+        "Defaults to HYBRID_DENSE_WEIGHT env / 0.5.",
+    )
+    sparse_weight: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Weight for the sparse vector in hybrid chunk retrieval. See dense_weight. "
+        "0.0 = dense-only.",
+    )
+
     max_entity_tokens: Optional[int] = Field(
         default=None,
         description="Maximum number of tokens allocated for entity context in unified token control system.",

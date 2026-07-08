@@ -459,10 +459,11 @@ def _make_client(monkeypatch, addon_params=None):
     """
     captured: dict = {}
 
-    async def _spy(rag, texts, file_sources=None, track_id=None, chunking=None):
+    async def _spy(rag, texts, file_sources=None, track_id=None, chunking=None, skip_kg=None):
         captured["texts"] = texts
         captured["file_sources"] = file_sources
         captured["chunking"] = chunking
+        captured["skip_kg"] = skip_kg
 
     async def _noop_reserve(rag, token):
         return False

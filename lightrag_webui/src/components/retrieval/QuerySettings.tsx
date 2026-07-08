@@ -63,6 +63,8 @@ export default function QuerySettings() {
     mode: 'mix' as QueryMode,
     top_k: 40,
     chunk_top_k: 20,
+    dense_weight: 0.5,
+    sparse_weight: 0.5,
     max_entity_tokens: 6000,
     max_relation_tokens: 8000,
     max_total_tokens: 30000
@@ -241,6 +243,90 @@ export default function QuerySettings() {
                 />
                 <ResetButton
                   onClick={() => handleReset('chunk_top_k')}
+                  title="Reset to default"
+                />
+              </div>
+            </>
+
+            {/* Dense Weight */}
+            <>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <label htmlFor="dense_weight" className="ml-1 cursor-help">
+                      {t('retrievePanel.querySettings.denseWeight')}
+                    </label>
+                  </TooltipTrigger>
+                  <TooltipContent side="left">
+                    <p>{t('retrievePanel.querySettings.denseWeightTooltip')}</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              <div className="flex items-center gap-1">
+                <Input
+                  id="dense_weight"
+                  type="number"
+                  step="0.1"
+                  min={0}
+                  max={1}
+                  value={querySettings.dense_weight ?? ''}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    handleChange('dense_weight', value === '' ? '' : parseFloat(value) || 0)
+                  }}
+                  onBlur={(e) => {
+                    const value = e.target.value
+                    if (value === '' || isNaN(parseFloat(value))) {
+                      handleChange('dense_weight', 0.5)
+                    }
+                  }}
+                  placeholder={t('retrievePanel.querySettings.denseWeightPlaceholder')}
+                  className="h-9 flex-1 pr-2 [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
+                />
+                <ResetButton
+                  onClick={() => handleReset('dense_weight')}
+                  title="Reset to default"
+                />
+              </div>
+            </>
+
+            {/* Sparse Weight */}
+            <>
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <label htmlFor="sparse_weight" className="ml-1 cursor-help">
+                      {t('retrievePanel.querySettings.sparseWeight')}
+                    </label>
+                  </TooltipTrigger>
+                  <TooltipContent side="left">
+                    <p>{t('retrievePanel.querySettings.sparseWeightTooltip')}</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              <div className="flex items-center gap-1">
+                <Input
+                  id="sparse_weight"
+                  type="number"
+                  step="0.1"
+                  min={0}
+                  max={1}
+                  value={querySettings.sparse_weight ?? ''}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    handleChange('sparse_weight', value === '' ? '' : parseFloat(value) || 0)
+                  }}
+                  onBlur={(e) => {
+                    const value = e.target.value
+                    if (value === '' || isNaN(parseFloat(value))) {
+                      handleChange('sparse_weight', 0.5)
+                    }
+                  }}
+                  placeholder={t('retrievePanel.querySettings.sparseWeightPlaceholder')}
+                  className="h-9 flex-1 pr-2 [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [-moz-appearance:textfield]"
+                />
+                <ResetButton
+                  onClick={() => handleReset('sparse_weight')}
                   title="Reset to default"
                 />
               </div>

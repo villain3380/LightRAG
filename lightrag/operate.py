@@ -4517,9 +4517,21 @@ async def _get_vector_context(
         search_top_k = query_param.chunk_top_k or query_param.top_k
         cosine_threshold = chunks_vdb.cosine_better_than_threshold
 
-        results = await chunks_vdb.query(
-            query, top_k=search_top_k, query_embedding=query_embedding
-        )
+        if getattr(chunks_vdb, "sparse_enabled", False):
+            # Mode 2: dense + sparse hybrid retrieval on chunks. Weights come
+            # from QueryParam (dense_weight/sparse_weight), defaulting to 0.5/0.5;
+            # sparse_weight=0 short-circuits to dense-only inside query_hybrid.
+            results = await chunks_vdb.query_hybrid(
+                query,
+                top_k=search_top_k,
+                query_embedding=query_embedding,
+                dense_weight=query_param.dense_weight,
+                sparse_weight=query_param.sparse_weight,
+            )
+        else:
+            results = await chunks_vdb.query(
+                query, top_k=search_top_k, query_embedding=query_embedding
+            )
         if not results:
             logger.info(
                 f"Naive query: 0 chunks (chunk_top_k:{search_top_k} cosine:{cosine_threshold})"

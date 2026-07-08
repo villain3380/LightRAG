@@ -47,6 +47,13 @@ def default_addon_params() -> dict[str, Any]:
     return {
         "language": get_env_value("SUMMARY_LANGUAGE", DEFAULT_SUMMARY_LANGUAGE, str),
         "entity_type_prompt_file": get_env_value("ENTITY_TYPE_PROMPT_FILE", "", str),
+        # Chunk retrieval strategy for the chunks vector store.
+        #   "dense"         - dense vector search only (mode 1).
+        #   "dense_sparse"  - dense + sparse hybrid retrieval (mode 2); requires
+        #                     an embedding_func with supports_sparse=True
+        #                     (e.g. dashscope_embed). Mode 3 (KG) is unaffected -
+        #                     it is selected via QueryParam.mode.
+        "chunk_retrieval_mode": get_env_value("CHUNK_RETRIEVAL_MODE", "dense", str),
         # Per-strategy chunker parameters; mutate at runtime (e.g.
         # ``rag.addon_params["chunker"]["recursive_character"]["separators"]
         # = [...]``) to change defaults applied to subsequently
@@ -84,6 +91,9 @@ def normalize_addon_params(addon_params: Mapping[str, Any] | None) -> dict[str, 
     normalized.setdefault(
         "entity_type_prompt_file",
         get_env_value("ENTITY_TYPE_PROMPT_FILE", "", str),
+    )
+    normalized.setdefault(
+        "chunk_retrieval_mode", get_env_value("CHUNK_RETRIEVAL_MODE", "dense", str)
     )
     # Build the chunker default lazily — `default_chunker_config()` reads env
     # vars (e.g. CHUNK_R_SEPARATORS via json.loads) and would raise on a

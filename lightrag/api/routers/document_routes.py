@@ -22,6 +22,7 @@ from fastapi import (
     APIRouter,
     Depends,
     File,
+    Form,
     HTTPException,
     Request,
     Response,
@@ -41,6 +42,7 @@ from lightrag.constants import (
     PROCESS_OPTION_CHUNK_PARAGRAH,
     PROCESS_OPTION_CHUNK_RECURSIVE,
     PROCESS_OPTION_CHUNK_VECTOR,
+    PROCESS_OPTION_SKIP_KG,
 )
 from lightrag.parser.routing import (
     FilenameParserHintError,
@@ -418,6 +420,10 @@ class InsertTextRequest(BaseModel):
         default=None,
         description="Chunking strategy and params; omit for default fixed-token chunking",
     )
+    skip_kg: Optional[bool] = Field(
+        default=None,
+        description="If True, skip knowledge-graph entity/relation extraction (dense+sparse only, no KG). Default False (extract KG).",
+    )
 
     @field_validator("text", mode="after")
     @classmethod
@@ -470,6 +476,10 @@ class InsertTextsRequest(BaseModel):
     chunking: Optional[TextChunkingConfig] = Field(
         default=None,
         description="Shared chunking strategy and params for all texts; omit for default fixed-token chunking",
+    )
+    skip_kg: Optional[bool] = Field(
+        default=None,
+        description="If True, skip knowledge-graph entity/relation extraction (dense+sparse only, no KG) for all texts. Default False (extract KG).",
     )
 
     @field_validator("texts", mode="after")
@@ -725,6 +735,106 @@ class DocStatusResponse(BaseModel):
         }
     )
 
+class ChunkInfo(BaseModel):
+    """A single text chunk with its content and metadata, for the chunk inspector."""
+
+    chunk_id: str = Field(description="Chunk identifier (chunk-<mdhash>)")
+    order_index: int = Field(
+        description="Zero-based index of the chunk within its document"
+    )
+    tokens: int = Field(description="Token count of the chunk content")
+    content: str = Field(description="Chunk text content (may contain markdown)")
+    heading: Optional[dict[str, Any]] = Field(
+        default=None, description="Heading path metadata for the chunk, if any"
+    )
+    file_path: Optional[str] = Field(
+        default=None, description="Canonical file path of the source document"
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "chunk_id": "chunk-a1b2c3d4",
+                "order_index": 0,
+                "tokens": 512,
+                "content": "# Introduction\n\nThis document...",
+                "heading": {"level": 1, "text": "Introduction"},
+                "file_path": "research_paper.pdf",
+            }
+        }
+    )
+
+
+class DocumentMetadataInfo(BaseModel):
+    """Document-level metadata for the chunk inspector."""
+
+    id: str = Field(description="Document identifier")
+    content_summary: str = Field(description="First 100 chars of document content")
+    content_length: int = Field(
+        description="Total length of document content in characters"
+    )
+    status: DocStatus = Field(description="Current processing status")
+    created_at: Optional[str] = Field(
+        default=None, description="Creation timestamp (ISO format string)"
+    )
+    updated_at: Optional[str] = Field(
+        default=None, description="Last update timestamp (ISO format string)"
+    )
+    track_id: Optional[str] = Field(
+        default=None, description="Tracking ID for monitoring progress"
+    )
+    chunks_count: Optional[int] = Field(
+        default=None, description="Number of chunks the document was split into"
+    )
+    file_path: str = Field(description="Canonical basename of the source document")
+    content_hash: Optional[str] = Field(
+        default=None, description="MD5 hash of document content"
+    )
+    metadata: Optional[dict[str, Any]] = Field(
+        default=None, description="Additional metadata about the document"
+    )
+    error_msg: Optional[str] = Field(
+        default=None, description="Error message if processing failed"
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "doc_123456",
+                "content_summary": "Research paper on machine learning",
+                "content_length": 15240,
+                "status": "processed",
+                "created_at": "2025-03-31T12:34:56",
+                "updated_at": "2025-03-31T12:35:30",
+                "track_id": "upload_20250729_170612_abc123",
+                "chunks_count": 12,
+                "file_path": "research_paper.pdf",
+                "content_hash": "abc123",
+                "metadata": {"author": "John Doe"},
+                "error_msg": None,
+            }
+        }
+    )
+
+
+class DocumentChunksResponse(BaseModel):
+    """Response for the document chunk inspector endpoint."""
+
+    doc_metadata: DocumentMetadataInfo = Field(
+        description="Document-level metadata"
+    )
+    chunks: List[ChunkInfo] = Field(
+        description="List of chunks belonging to the document, ordered by chunk_order_index"
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "doc_metadata": {"id": "doc_123456", "status": "processed"},
+                "chunks": [{"chunk_id": "chunk-a1b2c3d4", "order_index": 0}],
+            }
+        }
+    )
 
 class DocsStatusesResponse(BaseModel):
     """Response model for document statuses
@@ -1792,11 +1902,24 @@ async def record_scan_warning(rag: LightRAG, message: str) -> None:
 # legacy engine now extracts at the worker stage (LegacyParser), not here.
 
 
+def _apply_skip_kg(process_options: str, skip_kg: bool | None) -> str:
+    """Append the skip-KG directive (``!``) to ``process_options`` when requested.
+
+    ``skip_kg=True`` makes the ingestion ``dense_sparse`` (no KG): chunks are
+    still embedded (dense+sparse) but entity/relation extraction is skipped, so
+    the KG storages stay empty for this document. Idempotent.
+    """
+    if not skip_kg or PROCESS_OPTION_SKIP_KG in process_options:
+        return process_options
+    return process_options + PROCESS_OPTION_SKIP_KG
+
+
 async def pipeline_enqueue_file(
     rag: LightRAG,
     file_path: Path,
     track_id: str = None,
     from_scan: bool = False,
+    skip_kg: bool | None = False,
 ) -> tuple[bool, str]:
     """Add a file to the queue for processing
 
@@ -1847,6 +1970,7 @@ async def pipeline_enqueue_file(
         extraction_engine = directives.engine
         process_options = directives.process_options
         api_process_options = process_options or PROCESS_OPTION_CHUNK_FIXED
+        api_process_options = _apply_skip_kg(api_process_options, skip_kg)
 
         # Overlay any per-file chunk parameters (from the filename hint or a
         # LIGHTRAG_PARSER rule) onto the active strategy's chunk_options so the
@@ -1958,16 +2082,21 @@ async def pipeline_enqueue_file(
                 logger.error(f"Error deleting file {file_path}: {str(e)}")
 
 
-async def pipeline_index_file(rag: LightRAG, file_path: Path, track_id: str = None):
+async def pipeline_index_file(
+    rag: LightRAG, file_path: Path, track_id: str = None, skip_kg: bool | None = False
+):
     """Index a file with track_id
 
     Args:
         rag: LightRAG instance
         file_path: Path to the saved file
         track_id: Optional tracking ID
+        skip_kg: If True, skip knowledge-graph extraction (dense+sparse only).
     """
     try:
-        success, _ = await pipeline_enqueue_file(rag, file_path, track_id)
+        success, _ = await pipeline_enqueue_file(
+            rag, file_path, track_id, skip_kg=skip_kg
+        )
         if success:
             await rag.apipeline_process_enqueue_documents()
 
@@ -1981,6 +2110,7 @@ async def pipeline_index_files(
     file_paths: List[Path],
     track_id: str = None,
     from_scan: bool = False,
+    skip_kg: bool | None = False,
 ) -> bool:
     """Index multiple files sequentially to avoid high CPU load
 
@@ -2020,6 +2150,7 @@ async def pipeline_index_files(
                 file_path,
                 track_id,
                 from_scan=from_scan,
+                skip_kg=skip_kg,
             )
             if success:
                 enqueued = True
@@ -2165,6 +2296,7 @@ async def pipeline_index_texts(
     file_sources: List[str] = None,
     track_id: str = None,
     chunking: Optional[TextChunkingConfig] = None,
+    skip_kg: bool | None = False,
 ):
     """Index a list of texts with track_id
 
@@ -2189,6 +2321,7 @@ async def pipeline_index_texts(
         raise ValueError("File sources must be unique by filename")
 
     process_options, chunk_options = _resolve_text_chunking(chunking, rag)
+    process_options = _apply_skip_kg(process_options, skip_kg)
     await rag.apipeline_enqueue_documents(
         input=texts,
         file_paths=normalized_file_sources,
@@ -3086,6 +3219,7 @@ def create_document_routes(
     async def upload_to_input_dir(
         managed_tasks: set = Depends(get_managed_background_tasks),
         file: UploadFile = File(...),
+        skip_kg: bool = Form(False),
     ):
         """
         Upload a file to the input directory and index it.
@@ -3309,7 +3443,7 @@ def create_document_routes(
                 # cancellation therefore cannot strand the enqueue slot.
                 started.set()
                 try:
-                    await pipeline_index_file(rag, file_path, track_id)
+                    await pipeline_index_file(rag, file_path, track_id, skip_kg=skip_kg)
                 finally:
                     await _release_enqueue_slot(rag, enqueue_token)
 
@@ -3442,6 +3576,7 @@ def create_document_routes(
                         file_sources=[normalized_file_source],
                         track_id=track_id,
                         chunking=request.chunking,
+                        skip_kg=request.skip_kg,
                     )
                 finally:
                     await _release_enqueue_slot(rag, enqueue_token)
@@ -3589,6 +3724,7 @@ def create_document_routes(
                         file_sources=normalized_file_sources,
                         track_id=track_id,
                         chunking=request.chunking,
+                        skip_kg=request.skip_kg,
                     )
                 finally:
                     await _release_enqueue_slot(rag, enqueue_token)
@@ -4877,5 +5013,104 @@ def create_document_routes(
             logger.error(f"Error requesting pipeline cancellation: {str(e)}")
             logger.error(traceback.format_exc())
             raise internal_server_error(e)
+
+    @router.get(
+        "/{doc_id}/chunks",
+        response_model=DocumentChunksResponse,
+        dependencies=[Depends(combined_auth)],
+    )
+    async def get_document_chunks(doc_id: str) -> DocumentChunksResponse:
+        """Get all chunks of a document for the chunk inspector.
+
+        Returns document-level metadata plus the list of text chunks (content,
+        token count, order index, heading) ordered by ``chunk_order_index``.
+        Used by the WebUI chunk inspection view to visualize how a document
+        was split.
+
+        Args:
+            doc_id (str): The document identifier.
+
+        Returns:
+            DocumentChunksResponse: Document metadata and its chunks.
+
+        Raises:
+            HTTPException: 404 if the document is not found; 500 on other errors.
+        """
+        try:
+            doc_status_data = await rag.doc_status.get_by_id(doc_id)
+            if not doc_status_data:
+                raise HTTPException(
+                    status_code=404, detail=f"Document {doc_id} not found"
+                )
+
+            # Chunk ids are persisted on the doc_status row (see adelete_by_doc_id);
+            # order-preserving dedup keeps a stable, storage-contract-safe list.
+            chunk_ids = list(
+                dict.fromkeys(doc_status_data.get("chunks_list") or [])
+            )
+
+            chunks: list[ChunkInfo] = []
+            text_chunks_storage = getattr(rag, "text_chunks", None)
+            if chunk_ids and text_chunks_storage is not None:
+                chunk_data_list = await text_chunks_storage.get_by_ids(chunk_ids)
+                for idx, chunk_data in enumerate(chunk_data_list):
+                    if not chunk_data or not isinstance(chunk_data, dict):
+                        continue
+                    # chunk id lives under "_id" on JSON backends, "id" on SQL
+                    # backends; fall back to the requested id at this position.
+                    chunk_id = (
+                        chunk_data.get("_id")
+                        or chunk_data.get("id")
+                        or (chunk_ids[idx] if idx < len(chunk_ids) else "")
+                    )
+                    raw_order = chunk_data.get("chunk_order_index")
+                    try:
+                        order_index = (
+                            int(raw_order) if raw_order is not None else idx
+                        )
+                    except (TypeError, ValueError):
+                        order_index = idx
+                    try:
+                        tokens = int(chunk_data.get("tokens", 0) or 0)
+                    except (TypeError, ValueError):
+                        tokens = 0
+                    chunks.append(
+                        ChunkInfo(
+                            chunk_id=str(chunk_id),
+                            order_index=order_index,
+                            tokens=tokens,
+                            content=chunk_data.get("content", "") or "",
+                            heading=chunk_data.get("heading") or None,
+                            file_path=normalize_file_path(
+                                chunk_data.get("file_path")
+                            ),
+                        )
+                    )
+
+            chunks.sort(key=lambda c: c.order_index)
+
+            doc_metadata = DocumentMetadataInfo(
+                id=doc_id,
+                content_summary=doc_status_data.get("content_summary", "") or "",
+                content_length=int(doc_status_data.get("content_length", 0) or 0),
+                status=doc_status_data.get("status", DocStatus.FAILED),
+                created_at=format_datetime(doc_status_data.get("created_at")),
+                updated_at=format_datetime(doc_status_data.get("updated_at")),
+                track_id=doc_status_data.get("track_id"),
+                chunks_count=doc_status_data.get("chunks_count"),
+                file_path=normalize_file_path(doc_status_data.get("file_path")),
+                content_hash=doc_status_data.get("content_hash"),
+                metadata=doc_status_data.get("metadata"),
+                error_msg=doc_status_data.get("error_msg"),
+            )
+
+            return DocumentChunksResponse(doc_metadata=doc_metadata, chunks=chunks)
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting chunks for document {doc_id}: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(e))
 
     return router

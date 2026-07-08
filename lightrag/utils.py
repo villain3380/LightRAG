@@ -503,6 +503,24 @@ class TaskState:
 
 
 @dataclass
+class EmbeddingResult:
+    """Result of an embedding call that may include sparse vectors.
+
+    Returned by sparse-capable bindings (``supports_sparse=True``) when called
+    via ``EmbeddingFunc.aembed(..., with_sparse=True)``.
+
+    Attributes:
+        dense: ``(n, dim)`` float32 ndarray - always populated.
+        sparse: per-text sparse vectors as ``{token_id: weight}`` dicts, or
+            ``None`` when the call did not produce sparse vectors (dense-only
+            model, or ``with_sparse=False``).
+    """
+
+    dense: np.ndarray
+    sparse: list[dict[int, float]] | None = None
+
+
+@dataclass
 class EmbeddingFunc:
     """Embedding function wrapper with dimension validation
 
@@ -553,6 +571,9 @@ class EmbeddingFunc:
     supports_asymmetric: bool = (
         False  # Whether underlying function accepts context parameter
     )
+    supports_sparse: bool = (
+        False  # Whether underlying function can return sparse vectors (EmbeddingResult)
+    )
 
     def __post_init__(self):
         """Unwrap nested EmbeddingFunc to prevent double wrapping issues.
@@ -582,7 +603,12 @@ class EmbeddingFunc:
                 "Consider using .func to access the unwrapped function directly."
             )
 
-    async def __call__(self, *args, **kwargs) -> np.ndarray:
+    def _prepare_kwargs(self, kwargs: dict) -> None:
+        """Inject wrapper-managed params into ``kwargs`` in place.
+
+        Shared by ``__call__`` and ``aembed`` so both apply identical
+        preprocessing (embedding_dim / context / max_token_size handling).
+        """
         # Only inject embedding_dim when send_dimensions is True
         if self.send_dimensions:
             # Check if user provided embedding_dim parameter
@@ -615,9 +641,8 @@ class EmbeddingFunc:
             if "max_token_size" in sig.parameters:
                 kwargs["max_token_size"] = self.max_token_size
 
-        # Call the actual embedding function
-        result = await self.func(*args, **kwargs)
-
+    def _validate_dense(self, result: np.ndarray, args: tuple) -> None:
+        """Validate a dense ndarray against embedding_dim and input text count."""
         # Validate embedding dimensions using total element count
         total_elements = result.size  # Total number of elements in the numpy array
         expected_dim = self.embedding_dim
@@ -640,6 +665,65 @@ class EmbeddingFunc:
                     f"expected {expected_vectors} vectors but got {actual_vectors} vectors (from embedding result)."
                 )
 
+    async def __call__(self, *args, **kwargs) -> np.ndarray:
+        self._prepare_kwargs(kwargs)
+
+        # Call the actual embedding function
+        result = await self.func(*args, **kwargs)
+
+        # Sparse-capable funcs return ndarray on the dense path (with_sparse
+        # defaults to False); guard anyway so a stray EmbeddingResult is unwrapped.
+        if isinstance(result, EmbeddingResult):
+            result = result.dense
+        self._validate_dense(result, args)
+        return result
+
+    async def aembed(
+        self, *args, with_sparse: bool = False, **kwargs
+    ) -> np.ndarray | EmbeddingResult:
+        """Extended embedding call that can also return sparse vectors.
+
+        Args:
+            with_sparse: ``False`` (default) returns a dense ``np.ndarray``
+                exactly like ``__call__``. ``True`` returns an
+                :class:`EmbeddingResult` carrying both dense and sparse vectors;
+                requires ``supports_sparse=True``.
+
+        Raises:
+            ValueError: ``with_sparse=True`` on a non-sparse-capable binding.
+            TypeError: a sparse-capable binding returned a non-``EmbeddingResult`.
+        """
+        if with_sparse and not self.supports_sparse:
+            raise ValueError(
+                "with_sparse=True requested but this embedding_func does not support "
+                "sparse vectors (supports_sparse=False). Use a sparse-capable binding "
+                "(e.g. dashscope_embed)."
+            )
+
+        self._prepare_kwargs(kwargs)
+
+        # Inject with_sparse=True only when the underlying function accepts it
+        # (supports_sparse implies it does, but stay defensive).
+        if with_sparse:
+            sig = inspect.signature(self.func)
+            if "with_sparse" in sig.parameters:
+                kwargs["with_sparse"] = True
+
+        result = await self.func(*args, **kwargs)
+
+        if with_sparse:
+            if not isinstance(result, EmbeddingResult):
+                raise TypeError(
+                    f"Embedding func returned {type(result).__name__}, expected "
+                    f"EmbeddingResult for with_sparse=True."
+                )
+            self._validate_dense(result.dense, args)
+            return result
+
+        # Dense path: mirror __call__
+        if isinstance(result, EmbeddingResult):
+            result = result.dense
+        self._validate_dense(result, args)
         return result
 
 
@@ -2390,6 +2474,16 @@ def wrap_embedding_func_with_attrs(**kwargs):
             except (TypeError, ValueError):
                 # inspect.signature can fail for builtins; fall back to False.
                 embedding_kwargs["supports_asymmetric"] = False
+        # Auto-detect supports_sparse from the wrapped function's signature
+        # if the caller did not declare it explicitly. A binding that accepts a
+        # ``with_sparse`` parameter is treated as sparse-capable so callers can
+        # use ``aembed(..., with_sparse=True)`` without setting the flag by hand.
+        if "supports_sparse" not in embedding_kwargs:
+            try:
+                sig = inspect.signature(func)
+                embedding_kwargs["supports_sparse"] = "with_sparse" in sig.parameters
+            except (TypeError, ValueError):
+                embedding_kwargs["supports_sparse"] = False
         new_func = EmbeddingFunc(**embedding_kwargs, func=func)
         return new_func
 

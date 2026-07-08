@@ -1,0 +1,167 @@
+# LightRAG + PostgreSQL(KV/状态) + Neo4j(图) + Milvus(向量) 单机部署
+# 基于 docker-compose-full.yml 裁剪：去掉 vLLM/GPU，embedding 走云端 DashScope(.env)。
+# 用法：docker compose -f docker-compose-milvus.yml up -d
+# 依赖宿主机已运行本地 MinerU(MINERU_LOCAL_ENDPOINT)，通过 host.docker.internal 访问。
+services:
+  lightrag:
+    image: ghcr.io/hkuds/lightrag:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      tags:
+        - ghcr.io/hkuds/lightrag:latest
+    ports:
+      - "127.0.0.1:${PORT:-9621}:9621"   # 只绑本机回环，外部网络访问不到
+    volumes:
+      - ./data/rag_storage:/app/data/rag_storage
+      - ./data/inputs:/app/data/inputs
+      - ./data/prompts:/app/data/prompts
+      - ./.env:/app/.env
+    deploy:
+      restart_policy:
+        condition: on-failure
+        max_attempts: 10
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # 让容器能访问宿主机的 MinerU(8000)
+    environment:
+      # 容器内固定路径
+      WORKING_DIR: "/app/data/rag_storage"
+      INPUT_DIR: "/app/data/inputs"
+      PROMPT_DIR: "/app/data/prompts"
+      HOST: "0.0.0.0"
+      PORT: "9621"
+      # 用服务名覆盖 .env 里的 localhost(这些值优先级高于 .env)
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      NEO4J_URI: "neo4j://neo4j:7687"
+      MILVUS_URI: "http://milvus:19530"
+      # 注意：EMBEDDING_*/LLM_*/MINERU_*/LIGHTRAG_*_STORAGE 不在此覆盖，
+      # 全部由 .env 提供(DashScope embedding + 本地 MinerU + Milvus/Neo4j/PG 存储)
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+
+  postgres:
+    # 仅用于 KV + DocStatus(向量已交给 Milvus，不需要 pgvector 扩展)
+    image: postgres:17
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag}"]
+      interval: 5s
+      timeout: 3s
+      retries: 120
+      start_period: 10s
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-rag}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-rag}"
+      POSTGRES_DB: "${POSTGRES_DATABASE:-rag}"
+
+  neo4j:
+    image: neo4j:5-community
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 120
+      start_period: 30s
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: "${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set in .env}"
+      NEO4J_dbms_default__database: "neo4j"
+
+  milvus:
+    # CPU 版 standalone(无需 NVIDIA GPU)；如有 GPU 可改 milvusdb/milvus:v2.6.11-gpu 并加 deploy.resources
+    image: milvusdb/milvus:v2.6.11
+    ports:
+      - "127.0.0.1:19530:19530"
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+      MINIO_ACCESS_KEY_ID: "${MINIO_ACCESS_KEY_ID:?must be set in .env}"
+      MINIO_SECRET_ACCESS_KEY: "${MINIO_SECRET_ACCESS_KEY:?must be set in .env}"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9091/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 120
+      start_period: 30s
+    depends_on:
+      milvus-etcd:
+        condition: service_healthy
+      milvus-minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  milvus-etcd:
+    image: quay.io/coreos/etcd:v3.5.25
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - milvus-etcd_data:/etcd
+    command: >
+      etcd
+      -advertise-client-urls=http://0.0.0.0:2379
+      -listen-client-urls=http://0.0.0.0:2379
+      -data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 20s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  milvus-minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ACCESS_KEY_ID:?must be set in .env}"
+      MINIO_ROOT_PASSWORD: "${MINIO_SECRET_ACCESS_KEY:?must be set in .env}"
+    volumes:
+      - milvus-minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+# 复用另一个项目(lightrag)已有数据的 volume，免去重新导入知识库。
+# 代价：lightrag-woo 与 lightrag 共用同一份数据，且两个项目不能同时 up
+# （同一组 volume + 端口 5432/7687/19530 冲突）。
+volumes:
+  postgres_data:
+    external: true
+    name: lightrag_postgres_data
+  neo4j_data:
+    external: true
+    name: lightrag_neo4j_data
+  milvus_data:
+    external: true
+    name: lightrag_milvus_data
+  milvus-etcd_data:
+    external: true
+    name: lightrag_milvus-etcd_data
+  milvus-minio_data:
+    external: true
+    name: lightrag_milvus-minio_data

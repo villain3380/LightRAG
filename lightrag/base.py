@@ -112,6 +112,16 @@ class QueryParam:
     If None, defaults to top_k value.
     """
 
+    dense_weight: float = float(os.getenv("HYBRID_DENSE_WEIGHT", "0.5"))
+    """Weight of the dense vector in hybrid (dense+sparse) chunk retrieval.
+    Only applies when chunks_vdb is sparse-enabled (chunk_retrieval_mode='dense_sparse').
+    Examples: (1.0, 0.0) = dense-only; (0.5, 0.5) = balanced; (0.7, 0.3) = dense-favoring.
+    Paired with ``sparse_weight``; the sparse component contributes 0 when sparse_weight=0.
+    """
+
+    sparse_weight: float = float(os.getenv("HYBRID_SPARSE_WEIGHT", "0.5"))
+    """Weight of the sparse vector in hybrid chunk retrieval. See ``dense_weight``."""
+
     max_entity_tokens: int = get_env_value(
         "MAX_ENTITY_TOKENS", DEFAULT_MAX_ENTITY_TOKENS, int
     )
@@ -221,6 +231,12 @@ class BaseVectorStorage(StorageNameSpace, ABC):
     embedding_func: EmbeddingFunc
     cosine_better_than_threshold: float = field(default=0.2)
     meta_fields: set[str] = field(default_factory=set)
+    # True when this storage is configured for dense+sparse hybrid retrieval
+    # (chunk_retrieval_mode=="dense_sparse" and embedding_func.supports_sparse).
+    # Sparse-capable backends set this in __post_init__; the default False keeps
+    # dense-only backends unchanged. The retrieval path branches on this to
+    # choose query() vs query_hybrid().
+    sparse_enabled: bool = False
 
     def _validate_embedding_func(self):
         """Validate that embedding_func is provided.
@@ -276,6 +292,36 @@ class BaseVectorStorage(StorageNameSpace, ABC):
             query_embedding: Optional pre-computed embedding for the query.
                            If provided, skips embedding computation for better performance.
         """
+
+    async def query_hybrid(
+        self,
+        query: str,
+        top_k: int,
+        query_embedding: list[float] = None,
+        query_sparse: dict[int, float] | None = None,
+        dense_weight: float = 0.5,
+        sparse_weight: float = 0.5,
+    ) -> list[dict[str, Any]]:
+        """Hybrid (dense + sparse) similarity search.
+
+        Sparse-capable backends override this to run a true dense+sparse hybrid
+        query (e.g. Milvus ``hybrid_search`` with a weighted ranker). The
+        default implementation falls back to dense-only :meth:`query`, so
+        backends that do not support sparse need no changes.
+
+        Args:
+            query: The query string to search for.
+            top_k: Number of top results to return.
+            query_embedding: Optional pre-computed dense query embedding.
+            query_sparse: Optional pre-computed sparse query vector
+                (``{token_id: weight}``). When ``None``, a sparse-capable
+                backend computes it from ``query`` via
+                ``embedding_func.aembed(..., with_sparse=True)``.
+            dense_weight: Weight for the dense vector in the ranker
+                (e.g. 1.0/0.0 = dense-only, 0.5/0.5 = balanced).
+            sparse_weight: Weight for the sparse vector.
+        """
+        return await self.query(query, top_k, query_embedding)
 
     @abstractmethod
     async def upsert(self, data: dict[str, dict[str, Any]]) -> None:

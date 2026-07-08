@@ -197,6 +197,10 @@ export type QueryRequest = {
   top_k?: number
   /** Maximum number of text chunks to retrieve and keep after reranking. */
   chunk_top_k?: number
+  /** Weight for the dense vector in hybrid (dense+sparse) chunk retrieval. Only applies when chunk_retrieval_mode='dense_sparse'. 1.0/0.0=dense-only, 0.5/0.5=balanced. */
+  dense_weight?: number
+  /** Weight for the sparse vector in hybrid chunk retrieval. See dense_weight. 0.0 = dense-only. */
+  sparse_weight?: number
   /** Maximum number of tokens allocated for entity context in unified token control system. */
   max_entity_tokens?: number
   /** Maximum number of tokens allocated for relationship context in unified token control system. */
@@ -975,22 +979,32 @@ export const queryTextStream = async (
   }
 };
 
-export const insertText = async (text: string): Promise<DocActionResponse> => {
-  const response = await axiosInstance.post('/documents/text', { text })
+export const insertText = async (
+  text: string,
+  skipKg?: boolean
+): Promise<DocActionResponse> => {
+  const response = await axiosInstance.post('/documents/text', { text, skip_kg: skipKg })
   return response.data
 }
 
-export const insertTexts = async (texts: string[]): Promise<DocActionResponse> => {
-  const response = await axiosInstance.post('/documents/texts', { texts })
+export const insertTexts = async (
+  texts: string[],
+  skipKg?: boolean
+): Promise<DocActionResponse> => {
+  const response = await axiosInstance.post('/documents/texts', { texts, skip_kg: skipKg })
   return response.data
 }
 
 export const uploadDocument = async (
   file: File,
-  onUploadProgress?: (percentCompleted: number) => void
+  onUploadProgress?: (percentCompleted: number) => void,
+  skipKg?: boolean
 ): Promise<DocActionResponse> => {
   const formData = new FormData()
   formData.append('file', file)
+  if (skipKg) {
+    formData.append('skip_kg', 'true')
+  }
 
   const response = await axiosInstance.post('/documents/upload', formData, {
     headers: {

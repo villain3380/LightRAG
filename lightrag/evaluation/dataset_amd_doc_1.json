@@ -1,0 +1,124 @@
+{
+  "test_cases": [
+    {
+      "question": "vivado综合怎么设置多线程",
+      "ground_truth": "Vivado% set_param general.maxThreads <new limit>",
+      "project": "amd_vivado_sample",
+      "answer": "Vivado 综合（Synthesis）默认会在多处理器系统上利用最多八个 CPU 核心来加速编译。用户可以通过 Tcl 参数 `general.maxThreads` 来手动控制 RTL 综合阶段使用的线程数量。该参数适用于所有 Vivado 线程，设置时需指定一个 1 到 8 之间的整数，以限制同时运行的线程数。\n\n设置方法是在 Tcl 控制台或脚本中执行以下命令：\n```tcl\nset_param general.maxThreads <new limit>\n```\n例如，将线程数设为 4：\n```tcl\nset_param general.maxThreads 4\n```\n需要注意的是，`general.maxThreads` 仅对 RTL 综合阶段有效，最多可设置为 8 个线程。该参数可通过 Vivado IDE 的 Tcl 控制台、非项目模式下的 Tcl 脚本，或项目模式下的 `Tools → Settings → Synthesis` 中的 Tcl 预置命令进行配置。\n\n### References\n\n- [1] ug901-vivado-synthesis-en-us-2025.2.pdf",
+      "context_refs": [
+        {
+          "reference_id": "1",
+          "file_path": "ug901-vivado-synthesis-en-us-2025.2.pdf",
+          "chunks": 8
+        },
+        {
+          "reference_id": "2",
+          "file_path": "ug901-vivado-synthesis-2021.1.pdf",
+          "chunks": 6
+        },
+        {
+          "reference_id": "3",
+          "file_path": "ug579-ultrascale-dsp.pdf",
+          "chunks": 2
+        }
+      ]
+    },
+    {
+      "question": "VU9P有多少DSP资源",
+      "ground_truth": "Max Cascade = 120，Total = 6,840",
+      "project": "amd_vivado_sample",
+      "answer": "VU9P属于Virtex UltraScale+ FPGA系列，其DSP资源由DSP48E2 Slice构成。根据相关技术资料，该型号共包含 **6,840** 个DSP48E2 Slice。\n\n在级联能力方面，VU9P支持最大 **120** 个DSP48E2 Slice的直接垂直级联，这为设计高速、高精度的流水线数字信号处理（DSP）算法（如FIR滤波器、复杂数学运算）提供了充足的硬件资源保障。\n\n### References\n\n* [1] ug579-ultrascale-dsp.pdf",
+      "context_refs": [
+        {
+          "reference_id": "1",
+          "file_path": "ug579-ultrascale-dsp.pdf",
+          "chunks": 7
+        },
+        {
+          "reference_id": "2",
+          "file_path": "ug901-vivado-synthesis-en-us-2025.2.pdf",
+          "chunks": 4
+        },
+        {
+          "reference_id": "3",
+          "file_path": "ug901-vivado-synthesis-2021.1.pdf",
+          "chunks": 3
+        },
+        {
+          "reference_id": "4",
+          "file_path": "DataProto的流动.md",
+          "chunks": 2
+        },
+        {
+          "reference_id": "5",
+          "file_path": "初识verl.md",
+          "chunks": 2
+        },
+        {
+          "reference_id": "6",
+          "file_path": "大模型分布式训练.md",
+          "chunks": 1
+        },
+        {
+          "reference_id": "7",
+          "file_path": "S5-7课程内容.md",
+          "chunks": 1
+        }
+      ]
+    },
+    {
+      "question": "怎么把.v文件设置为systemverilog属性",
+      "ground_truth": "在Vivado中可通过TCL控制台执行命令将.v文件标记为SystemVerilog类型，核心TCL命令：\nset_property file_type SystemVerilog [get_files <filename>.v]\n将<filename>替换为实际文件名，示例（文件design.v）：\nset_property file_type SystemVerilog [get_files design.v]",
+      "project": "amd_vivado_sample",
+      "answer": "您可以通过以下两种方式将 `.v` 文件的属性设置为 SystemVerilog：\n\n---\n\n### 方法一：通过 Vivado IDE 图形界面\n\n在 Vivado IDE 中，选中目标 `.v` 文件，打开 **Source Node Properties**（源节点属性）窗口（也可通过 **Source File Properties** 窗口访问），在 “File Type”（文件类型）下拉菜单中选择 “SystemVerilog” 即可。该操作会将该文件作为 SystemVerilog 语法进行编译和综合。  \n\n此方法基于 Vivado 界面提供的直接配置选项，适用于交互式设计流程。\n\n---\n\n### 方法二：使用 Tcl 命令\n\n在 Vivado Tcl Console 中执行以下命令，可批量或脚本化地设置文件属性：\n\n```tcl\nset_property file_type SystemVerilog [get_files <文件名.v>]\n```\n\n例如，将 `test.v` 设置为 SystemVerilog 类型：\n\n```tcl\nset_property file_type SystemVerilog [get_files test.v]\n```\n\n该 Tcl 命令直接修改文件的 `FILE_TYPE` 属性，将值指定为 `SystemVerilog`。此方法常用于非项目模式或自动化设计流程中。\n\n---\n\n**说明**：  \n- 上述两种方式均基于 Vivado 综合工具对 SystemVerilog 语言的支持（遵循 IEEE Std 1800-2012），确保文件能够使用 SystemVerilog 特有的数据类型、过程块、接口等高级结构。  \n- 无论采用图形界面还是 Tcl 命令，系统都会将该 `.v` 文件按 SystemVerilog 语法解读，并启用其对应的综合特性。\n\n### References\n\n- [1] ug901-vivado-synthesis-en-us-2025.2.pdf  \n- [2] ug901-vivado-synthesis-2021.1.pdf",
+      "context_refs": [
+        {
+          "reference_id": "1",
+          "file_path": "ug901-vivado-synthesis-en-us-2025.2.pdf",
+          "chunks": 8
+        },
+        {
+          "reference_id": "2",
+          "file_path": "ug901-vivado-synthesis-2021.1.pdf",
+          "chunks": 7
+        }
+      ]
+    },
+    {
+      "question": "systemverilog的int数据类型有哪些",
+      "ground_truth": "SystemVerilog支持的整数数据类型分为2态与4态两类，2态仅支持0/1，4态额外支持X/Z；byte、shortint、int、integer、longint默认为有符号，bit、reg、logic默认为无符号，具体类型：\n1.shortint：2态16位有符号整数\n2.int：2态32位有符号整数\n3.longint：2态64位有符号整数\n4.byte：2态8位有符号整数\n5.bit：2态，位宽自定义\n6.logic：4态，位宽自定义\n7.reg：4态，位宽自定义\n8.integer：4态32位有符号整数\n9.time：4态64位无符号整数\n补充说明：X、Z无法全部综合，2态与4态类型综合行为一致；使用4态变量易出现RTL仿真结果不匹配问题。",
+      "project": "amd_vivado_sample",
+      "answer": "在SystemVerilog中，`int` 是一种**2-state 32位有符号整数**数据类型。\n\n- 它属于 `integer_atom_type` 中的一种，是 SystemVerilog 支持的完整整数类型之一（包括 `shortint`、`int`、`longint`、`byte`、`bit`、`logic`、`reg`、`integer`、`time`）。\n- `int` 默认值为 **有符号（signed）**，因此可以表示正数和负数。\n- 2-state 意味着只能表示逻辑值 **0** 和 **1**，不支持 X（未知）和 Z（高阻）状态；但在综合时，2-state 和 4-state 类型的处理方式相同。\n- 该类型被 Vivado 综合工具全面支持，并归类为“Signed and unsigned integer types”构造之一[1][2]。\n\n### References\n- [1] ug901-vivado-synthesis-en-us-2025.2.pdf\n- [2] ug901-vivado-synthesis-2021.1.pdf",
+      "context_refs": [
+        {
+          "reference_id": "1",
+          "file_path": "ug901-vivado-synthesis-en-us-2025.2.pdf",
+          "chunks": 10
+        },
+        {
+          "reference_id": "2",
+          "file_path": "ug901-vivado-synthesis-2021.1.pdf",
+          "chunks": 9
+        }
+      ]
+    },
+    {
+      "question": "2021版本的vivado synthesis命令和2025版本的有什么区别",
+      "ground_truth": "",
+      "project": "amd_vivado_sample",
+      "answer": "与2021版本相比，2025版本的Vivado Synthesis在`synth_design`命令的可用选项、功能特性以及流程上均有显著更新。主要区别如下：\n\n**命令选项的变更与新增**\n- **`-global_retiming` 取代 `-retiming`**：2025版本中将原有的`-retiming`选项替换为`-global_retiming`，并新增默认值描述（当设置为`\"auto\"`时，对于Versal器件默认开启重定时，非Versal器件默认关闭）[1]。\n- **新增 `-srl_style` 选项**：2025版本新增了`-srl_style`，用于控制静态移位寄存器（SRL）的实现风格，可选值包括`register`、`rl`、`srl_reg`、`reg_srl`和`reg_srl_reg`[1]。此选项在2021版本的帮助输出中未列出[2]。\n- **新增 `-rtl_skip_mlo` 选项**：2025版本增加了`-rtl_skip_mlo`，用于在RTL细化阶段跳过强制逻辑优化（需与`-rtl`选项配合）[1]。2021版本中仅有`-rtl_skip_ip`和`-rtl_skip_constraints`[2]。\n- **拼写修正**：2021版本中的`-no_srleextract`（多了一个'e'）在2025版本中更正为`-no_srlextract`，功能均为阻止移位寄存器提取为SRL[1][2]。\n\n**增量合成流程的简化**\n- **不再需要 `synth_design -incremental`**：2021版本要求参考运行和增量运行均使用`synth_design -incremental`命令[2]。2025版本中，增量合成仅需在合成前使用`read_checkpoint -incremental`或`read_checkpoint -auto_incremental`读取参考DCP，然后正常运行`synth_design`即可[1]。这一变化简化了非项目模式下的增量合成操作。\n\n**新增RTL Linter功能**\n- 2025版本集成了RTL Linter，可通过`synth_design -lint`或在IDE中运行，用于检测HDL代码中可能引起综合问题、仿真不匹配或意外行为的编码模式（如算数溢出、信号未赋值、锁存器推断等）[1]。2021版本文档中未提及此功能[2]。\n\n**对系统任务 `$info` 的支持**\n- 根据知识图谱信息，2025版本的Vivado Synthesis支持`$info`系统任务，而2021版本的支持表中未包含此项。不过此差异在提供的文档片段中未有明确对比，需结合知识图谱确认（知识图谱实体`$info`描述为“A system task for info reporting supported by Vivado synthesis”）。\n\n**其他细微差异**\n- 2025版本对`-mode out_of_context`选项的说明更详细，特别提醒`PACKAGE_PIN`属性仅当在RTL中实例化I/O缓冲时才可使用，否则会导致布局错误[1]。2021版本虽有类似警告，但表述较为简洁[2]。\n- 2025版本增加了对`-global_retiming`、`-srl_style`等选项的默认值及取值范围的具体描述，帮助用户更精确地控制综合行为[1]。\n\n综上所述，2025版本在保持核心综合能力的基础上，通过选项重构、流程简化和新功能（如Linter）的引入，提升了易用性和设计检查能力。\n\n### References\n\n* [1] ug901-vivado-synthesis-en-us-2025.2.pdf\n* [2] ug901-vivado-synthesis-2021.1.pdf",
+      "context_refs": [
+        {
+          "reference_id": "1",
+          "file_path": "ug901-vivado-synthesis-en-us-2025.2.pdf",
+          "chunks": 11
+        },
+        {
+          "reference_id": "2",
+          "file_path": "ug901-vivado-synthesis-2021.1.pdf",
+          "chunks": 9
+        }
+      ]
+    }
+  ]
+}

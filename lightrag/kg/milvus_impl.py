@@ -31,6 +31,8 @@ from pymilvus import (  # type: ignore
     DataType,
     CollectionSchema,
     FieldSchema,
+    AnnSearchRequest,
+    WeightedRanker,
 )
 from packaging import version
 
@@ -45,6 +47,9 @@ class _PendingVectorDoc:
     source: dict[str, Any]
     content: str
     vector: list[float] | None = None
+    # Sparse vector {token_id: weight}; populated only when sparse_enabled
+    # (chunk_retrieval_mode=="dense_sparse" on the chunks namespace).
+    sparse: dict[int, float] | None = None
 
 
 # Flush-time batching limits. Milvus' server-side proxy rejects any single
@@ -688,6 +693,13 @@ class MilvusVectorDBStorage(BaseVectorStorage):
         # Merge all fields
         all_fields = base_fields + specific_fields
 
+        # Sparse vector field (chunks + dense_sparse mode only). sparse_enabled
+        # is already scoped to the chunks namespace in __post_init__.
+        if self.sparse_enabled:
+            all_fields.append(
+                FieldSchema(name="sparse_vector", dtype=DataType.SPARSE_FLOAT_VECTOR)
+            )
+
         return CollectionSchema(
             fields=all_fields,
             description=description,
@@ -913,6 +925,24 @@ class MilvusVectorDBStorage(BaseVectorStorage):
         logger.debug(
             f"[{self.workspace}] Created vector index with config: {self.index_config.to_dict()}"
         )
+
+        # Sparse vector index (chunks + dense_sparse mode only).
+        if self.sparse_enabled:
+            sparse_index_params = self._get_index_params()
+            if sparse_index_params is not None:
+                sparse_index_params.add_index(
+                    field_name="sparse_vector",
+                    index_type="SPARSE_INVERTED_INDEX",
+                    metric_type="IP",
+                )
+                self._client.create_index(
+                    collection_name=self.final_namespace,
+                    index_params=sparse_index_params,
+                )
+                logger.debug(
+                    f"[{self.workspace}] Created sparse_vector index "
+                    f"(SPARSE_INVERTED_INDEX, IP)"
+                )
 
         # Create scalar indexes based on namespace
         # Wrap scalar index creation in try-except to allow graceful degradation
@@ -2051,6 +2081,25 @@ class MilvusVectorDBStorage(BaseVectorStorage):
         validate_workspace(self.workspace)
         self._validate_embedding_func()
 
+        # Resolve chunk retrieval mode. Only the chunks vector store opts into
+        # dense+sparse hybrid retrieval; entities/relationships stay dense-only
+        # (KG retrieval is unaffected - it is selected via QueryParam.mode).
+        chunk_retrieval_mode = (
+            self.global_config.get("addon_params", {}).get(
+                "chunk_retrieval_mode", "dense"
+            )
+        )
+        if self.namespace.endswith("chunks") and chunk_retrieval_mode == "dense_sparse":
+            if not getattr(self.embedding_func, "supports_sparse", False):
+                raise ValueError(
+                    "chunk_retrieval_mode='dense_sparse' requires an embedding_func "
+                    "with supports_sparse=True (e.g. dashscope_embed). The configured "
+                    "embedding_func is not sparse-capable."
+                )
+            self.sparse_enabled = True
+        else:
+            self.sparse_enabled = False
+
         # Extract MilvusIndexConfig parameters from vector_db_storage_cls_kwargs
         #
         # IMPORTANT: This approach allows Milvus index configuration via vector_db_storage_cls_kwargs,
@@ -2106,6 +2155,13 @@ class MilvusVectorDBStorage(BaseVectorStorage):
 
         self.workspace = effective_workspace or ""
         self.model_suffix = self._generate_collection_suffix()
+        # Sparse-enabled chunks get a dedicated collection suffix so the
+        # SPARSE_FLOAT_VECTOR field never collides with an existing dense-only
+        # collection (Milvus collection schemas are immutable).
+        if self.sparse_enabled:
+            self.model_suffix = (
+                f"{self.model_suffix}_sparse" if self.model_suffix else "sparse"
+            )
         if self.workspace:
             self.legacy_namespace = f"{self.workspace}_{self.namespace}"
             logger.debug(
@@ -2348,12 +2404,88 @@ class MilvusVectorDBStorage(BaseVectorStorage):
             limit=top_k,
             output_fields=output_fields,
             search_params=search_params,
+            # Specify the dense field explicitly: a sparse-enabled chunks
+            # collection has two vector fields (vector + sparse_vector), so
+            # Milvus cannot infer which one to search.
+            anns_field="vector",
         )
         return [
             {
                 **dp["entity"],
                 "id": dp["id"],
                 "distance": dp["distance"],
+                "created_at": dp.get("created_at"),
+            }
+            for dp in results[0]
+        ]
+
+    async def query_hybrid(
+        self,
+        query: str,
+        top_k: int,
+        query_embedding: list[float] = None,
+        query_sparse: dict[int, float] | None = None,
+        dense_weight: float = 0.5,
+        sparse_weight: float = 0.5,
+    ) -> list[dict[str, Any]]:
+        """Dense + sparse hybrid search against the persisted Milvus collection.
+
+        Used when ``sparse_enabled`` is True (chunk_retrieval_mode='dense_sparse'
+        on the chunks namespace). Falls back to dense-only :meth:`query`
+        otherwise. Runs Milvus ``hybrid_search`` with a ``WeightedRanker`` over a
+        dense request (on ``vector``) and a sparse request (on ``sparse_vector``).
+
+        ``sparse_weight=0`` (i.e. dense-only, e.g. 1.0/0.0) short-circuits to
+        :meth:`query` without running the sparse search.
+        """
+        if not self.sparse_enabled or sparse_weight <= 0:
+            return await self.query(query, top_k, query_embedding)
+
+        self._ensure_collection_loaded()
+
+        # Compute dense + sparse query vectors unless both are supplied.
+        if query_embedding is not None and query_sparse is not None:
+            dense_vec = list(query_embedding)
+            sparse_vec = dict(query_sparse)
+        else:
+            res = await self.embedding_func.aembed(
+                [query], context="query", with_sparse=True
+            )
+            dense_vec = res.dense[0].astype(np.float32).tolist()
+            sparse_vec = res.sparse[0] if res.sparse else {}
+
+        dense_search_params = self.index_config.build_search_params()
+        dense_req = AnnSearchRequest(
+            data=[dense_vec],
+            anns_field="vector",
+            param={
+                "metric_type": self.index_config.metric_type,
+                "params": dense_search_params.get("params", {}),
+            },
+            limit=top_k,
+        )
+        sparse_req = AnnSearchRequest(
+            data=[sparse_vec],
+            anns_field="sparse_vector",
+            param={
+                "metric_type": "IP",
+                "params": {"drop_ratio_search": 0.0},
+            },
+            limit=top_k,
+        )
+
+        results = self._client.hybrid_search(
+            collection_name=self.final_namespace,
+            reqs=[dense_req, sparse_req],
+            ranker=WeightedRanker(dense_weight, sparse_weight),
+            limit=top_k,
+            output_fields=list(self.meta_fields),
+        )
+        return [
+            {
+                **dp["entity"],
+                "id": dp["id"],
+                "distance": dp.get("distance"),
                 "created_at": dp.get("created_at"),
             }
             for dp in results[0]
@@ -2481,12 +2613,29 @@ class MilvusVectorDBStorage(BaseVectorStorage):
                     f"(batch_num={self._max_batch_size})"
                 )
                 try:
-                    embeddings_list = await asyncio.gather(
-                        *[
-                            self.embedding_func(batch, context="document")
-                            for batch in batches
+                    if self.sparse_enabled:
+                        results_list = await asyncio.gather(
+                            *[
+                                self.embedding_func.aembed(
+                                    batch, context="document", with_sparse=True
+                                )
+                                for batch in batches
+                            ]
+                        )
+                        embeddings = np.concatenate([r.dense for r in results_list])
+                        # Flatten per-text sparse vectors in input order.
+                        sparse_flat: list[dict[int, float]] = [
+                            s for r in results_list for s in (r.sparse or [])
                         ]
-                    )
+                    else:
+                        embeddings_list = await asyncio.gather(
+                            *[
+                                self.embedding_func(batch, context="document")
+                                for batch in batches
+                            ]
+                        )
+                        embeddings = np.concatenate(embeddings_list)
+                        sparse_flat = None
                 except Exception as e:
                     logger.error(
                         f"[{self.workspace}] Error embedding pending vector ops "
@@ -2494,11 +2643,15 @@ class MilvusVectorDBStorage(BaseVectorStorage):
                     )
                     raise
 
-                embeddings = np.concatenate(embeddings_list)
                 if len(embeddings) != len(docs_to_embed):
                     raise RuntimeError(
                         f"[{self.workspace}] Embedding count mismatch: expected "
                         f"{len(docs_to_embed)}, got {len(embeddings)}"
+                    )
+                if sparse_flat is not None and len(sparse_flat) != len(docs_to_embed):
+                    raise RuntimeError(
+                        f"[{self.workspace}] Sparse embedding count mismatch: "
+                        f"expected {len(docs_to_embed)}, got {len(sparse_flat)}"
                     )
                 for i, ((_, pdoc), embedding) in enumerate(
                     zip(docs_to_embed, embeddings), start=1
@@ -2509,6 +2662,8 @@ class MilvusVectorDBStorage(BaseVectorStorage):
                     # than float64, and Milvus stores FLOAT_VECTOR as float32
                     # anyway, so the cast is lossless).
                     pdoc.vector = np.array(embedding, dtype=np.float32).tolist()
+                    if sparse_flat is not None:
+                        pdoc.sparse = sparse_flat[i - 1]
                     await _cooperative_yield(i)
 
             # Assemble final upsert payload. After the embed loop above every
@@ -2517,13 +2672,14 @@ class MilvusVectorDBStorage(BaseVectorStorage):
             committed_ids: list[str] = list(pending_docs.keys())
             # source was already byte-truncated in upsert(); no need to
             # re-sanitize here (vector is not a VarChar field).
-            list_data: list[dict[str, Any]] = [
-                {
-                    **pending_docs[doc_id].source,
-                    "vector": pending_docs[doc_id].vector,
-                }
-                for doc_id in committed_ids
-            ]
+            list_data: list[dict[str, Any]] = []
+            for doc_id in committed_ids:
+                pdoc = pending_docs[doc_id]
+                row: dict[str, Any] = {**pdoc.source, "vector": pdoc.vector}
+                if self.sparse_enabled and pdoc.sparse is not None:
+                    # Milvus accepts {token_id: weight} for SPARSE_FLOAT_VECTOR.
+                    row["sparse_vector"] = pdoc.sparse
+                list_data.append(row)
 
             try:
                 if list_data:
