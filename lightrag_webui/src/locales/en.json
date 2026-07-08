@@ -40,6 +40,33 @@
     "saveFailed": "Save failed"
   },
   "documentPanel": {
+    "chunkInspector": {
+      "open": "View Chunks",
+      "close": "Close",
+      "docMetadata": "Document Metadata",
+      "loading": "Loading…",
+      "empty": "No chunks for this document",
+      "chunksUnit": "chunks",
+      "order": "order",
+      "tokens": "tokens",
+      "heading": "Heading path:",
+      "errors": {
+        "fetchFailed": "Failed to load chunks: {{error}}"
+      },
+      "fields": {
+        "id": "ID",
+        "filePath": "File Path",
+        "status": "Status",
+        "contentLength": "Content Length",
+        "chunksCount": "Chunks Count",
+        "trackId": "Track ID",
+        "contentHash": "Content Hash",
+        "createdAt": "Created At",
+        "updatedAt": "Updated At",
+        "errorMsg": "Error",
+        "metadata": "Metadata"
+      }
+    },
     "clearDocuments": {
       "button": "Clear",
       "tooltip": "Clear documents",

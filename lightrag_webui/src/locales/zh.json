@@ -40,6 +40,33 @@
     "saveFailed": "保存失败"
   },
   "documentPanel": {
+    "chunkInspector": {
+      "open": "查看分块",
+      "close": "关闭",
+      "docMetadata": "文档元数据",
+      "loading": "加载中…",
+      "empty": "该文档没有分块",
+      "chunksUnit": "个分块",
+      "order": "序号",
+      "tokens": "tokens",
+      "heading": "标题路径:",
+      "errors": {
+        "fetchFailed": "获取分块失败:{{error}}"
+      },
+      "fields": {
+        "id": "ID",
+        "filePath": "文件路径",
+        "status": "状态",
+        "contentLength": "内容长度",
+        "chunksCount": "分块数",
+        "trackId": "Track ID",
+        "contentHash": "内容哈希",
+        "createdAt": "创建时间",
+        "updatedAt": "更新时间",
+        "errorMsg": "错误信息",
+        "metadata": "元数据"
+      }
+    },
     "clearDocuments": {
       "button": "清空",
       "tooltip": "清空文档",

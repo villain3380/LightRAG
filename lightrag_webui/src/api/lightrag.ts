@@ -271,6 +271,82 @@ export type DocStatus =
   | 'processed'
   | 'failed'
 
+export type ChunkInfo = {
+  chunk_id: string
+  order_index: number
+  tokens: number
+  content: string
+  heading?: Record<string, any> | null
+  file_path?: string | null
+}
+
+export type DocumentMetadataInfo = {
+  id: string
+  content_summary: string
+  content_length: number
+  status: DocStatus
+  created_at?: string
+  updated_at?: string
+  track_id?: string
+  chunks_count?: number
+  file_path: string
+  content_hash?: string
+  metadata?: Record<string, any>
+  error_msg?: string
+}
+
+export type DocumentChunksResponse = {
+  doc_metadata: DocumentMetadataInfo
+  chunks: ChunkInfo[]
+}
+
+export type QueryTraceSummary = {
+  trace_id: string
+  timestamp: string
+  query: string
+  mode: string
+  elapsed_seconds: number
+  total_tokens: number
+  llm_call_count: number
+}
+
+export type QueryTraceLLMCall = {
+  step: string
+  call_count: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+}
+
+export type QueryTraceRetrievalStep = {
+  step: string
+  query: string
+  hits: Record<string, any>[]
+  count: number
+}
+
+export type QueryTraceDetail = {
+  trace_id: string
+  timestamp: string
+  query: string
+  mode: string
+  hl_keywords: string[]
+  ll_keywords: string[]
+  references: Record<string, any>[]
+  retrieved_chunks: Record<string, any>[]
+  llm_calls: QueryTraceLLMCall[]
+  retrieval_path: QueryTraceRetrievalStep[]
+  answer: string
+  elapsed_seconds: number
+  total_tokens: number
+  llm_call_count: number
+}
+
+export type QueryTraceListResponse = {
+  traces: QueryTraceSummary[]
+  total: number
+}
+
 export type DocStatusResponse = {
   id: string
   content_summary: string
@@ -581,6 +657,11 @@ export const getDocuments = async (): Promise<DocsStatusesResponse> => {
 
 export const getSupportedFileTypes = async (signal?: AbortSignal): Promise<SupportedFileTypes> => {
   const response = await axiosInstance.get('/documents/supported_file_types', { signal })
+  return response.data
+}
+
+export const getDocumentChunks = async (docId: string): Promise<DocumentChunksResponse> => {
+  const response = axiosInstance.get(`/documents/${encodeURIComponent(docId)}/chunks`)
   return response.data
 }
 
