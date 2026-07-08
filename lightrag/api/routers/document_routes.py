@@ -247,6 +247,88 @@ class CancelPipelineResponse(BaseModel):
     )
 
 
+class BuildKgResponse(BaseModel):
+    """Response model for single-document KG build operation
+
+    Attributes:
+        status: Status of the build operation (``build_kg_started`` or ``not_eligible``)
+        message: Human-readable message describing the operation result
+        doc_id: The document ID
+    """
+
+    status: Literal["build_kg_started", "not_eligible"] = Field(
+        description="Status of the KG build operation"
+    )
+    message: str = Field(description="Human-readable message describing the result")
+    doc_id: str = Field(description="The document ID")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "status": "build_kg_started",
+                "message": "Knowledge graph build started for document",
+                "doc_id": "doc_123456",
+            }
+        }
+    )
+
+
+class BuildKgBatchRequest(BaseModel):
+    """Request model for batch KG build operation
+
+    Attributes:
+        doc_ids: List of document IDs to build KG for
+    """
+
+    doc_ids: list[str] = Field(
+        min_length=1, description="List of document IDs to build KG for"
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "doc_ids": ["doc_123456", "doc_789012"],
+            }
+        }
+    )
+
+
+class BuildKgBatchResponse(BaseModel):
+    """Response model for batch KG build operation
+
+    Attributes:
+        status: Overall status (``build_kg_batch_started`` when at least one doc
+            was queued, ``build_kg_batch_partial`` when some docs were skipped)
+        message: Human-readable message
+        processed: List of document IDs that were successfully queued
+        skipped: List of skipped documents with reasons
+    """
+
+    status: Literal["build_kg_batch_started", "build_kg_batch_partial"] = Field(
+        description="Overall status of the batch operation"
+    )
+    message: str = Field(description="Human-readable summary")
+    processed: list[str] = Field(
+        default_factory=list,
+        description="Document IDs successfully queued for KG build",
+    )
+    skipped: list[dict[str, str]] = Field(
+        default_factory=list,
+        description="Skipped documents with reasons ({doc_id, reason})",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "status": "build_kg_batch_started",
+                "message": "KG build started for 1 document(s); 1 skipped.",
+                "processed": ["doc_123456"],
+                "skipped": [{"doc_id": "doc_789012", "reason": "KG already built"}],
+            }
+        }
+    )
+
+
 TextChunkingStrategy = Literal[
     "fixed_token",
     "recursive_character",
@@ -1912,6 +1994,98 @@ def _apply_skip_kg(process_options: str, skip_kg: bool | None) -> str:
     if not skip_kg or PROCESS_OPTION_SKIP_KG in process_options:
         return process_options
     return process_options + PROCESS_OPTION_SKIP_KG
+
+
+def _remove_skip_kg_from_process_options(process_options: str) -> str:
+    """Remove the skip-KG directive (``!``) from a process_options string.
+
+    Idempotent — calling on a string without ``!`` returns the same string.
+    """
+    return process_options.replace(PROCESS_OPTION_SKIP_KG, "")
+
+
+async def _build_kg_for_doc(
+    rag: LightRAG,
+    doc_id: str,
+) -> tuple[bool, str]:
+    """Core logic for triggering KG build on an already-processed document.
+
+    Reads the current doc_status + full_docs, validates eligibility,
+    removes ``!`` from ``process_options``, resets status to PENDING,
+    and triggers pipeline re-processing.
+
+    Args:
+        rag: LightRAG instance
+        doc_id: The document ID to build KG for
+
+    Returns:
+        (success, message) — success=True when the doc was queued;
+        success=False with a reason when ineligible.
+    """
+    # 1. Look up document
+    status_doc = await rag.doc_status.get_by_id(doc_id)
+    if not status_doc:
+        return False, f"Document not found: {doc_id}"
+
+    status_value = (
+        status_doc.get("status").value
+        if isinstance(status_doc.get("status"), DocStatus)
+        else str(status_doc.get("status", ""))
+    )
+
+    # 2. Must be PROCESSED
+    if status_value != DocStatus.PROCESSED.value:
+        return (
+            False,
+            f"Document status is '{status_value}', must be 'processed'",
+        )
+
+    # 3. Read current process_options from full_docs (authoritative source)
+    full_docs_data = await rag.full_docs.get_by_id(doc_id)
+    current_options = (
+        full_docs_data.get("process_options", "")
+        if isinstance(full_docs_data, dict)
+        else ""
+    )
+
+    # 4. Must have skip_kg flag (vector-only)
+    if PROCESS_OPTION_SKIP_KG not in current_options:
+        return False, "Knowledge graph already built (no '!' in process_options)"
+
+    # 5. Remove skip_kg flag
+    new_options = _remove_skip_kg_from_process_options(current_options)
+
+    # 6. Update full_docs
+    if isinstance(full_docs_data, dict):
+        full_docs_data["process_options"] = new_options
+        await rag.full_docs.upsert({doc_id: full_docs_data})
+        try:
+            await rag.full_docs.index_done_callback()
+        except Exception:
+            pass
+
+    # 7. Update doc_status to PENDING with updated metadata
+    existing_metadata = status_doc.get("metadata")
+    if not isinstance(existing_metadata, dict):
+        existing_metadata = {}
+    existing_metadata["process_options"] = new_options
+
+    updated_status = {
+        "status": DocStatus.PENDING,
+        "content_summary": status_doc.get("content_summary", ""),
+        "content_length": status_doc.get("content_length", 0),
+        "created_at": status_doc.get("created_at"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "file_path": status_doc.get("file_path", ""),
+        "track_id": status_doc.get("track_id"),
+        "chunks_count": status_doc.get("chunks_count"),
+        "chunks_list": status_doc.get("chunks_list", []),
+        "content_hash": status_doc.get("content_hash"),
+        "metadata": existing_metadata,
+    }
+    await rag.doc_status.upsert({doc_id: updated_status})
+
+    return True, f"Knowledge graph build started for document {doc_id}"
 
 
 async def pipeline_enqueue_file(
@@ -5112,5 +5286,117 @@ def create_document_routes(
             logger.error(f"Error getting chunks for document {doc_id}: {str(e)}")
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post(
+        "/build_kg_batch",
+        response_model=BuildKgBatchResponse,
+        dependencies=[Depends(combined_auth)],
+    )
+    async def build_kg_batch(
+        request: BuildKgBatchRequest,
+        background_tasks: BackgroundTasks,
+    ):
+        """Build knowledge graph for multiple documents.
+
+        For each document that was originally ingested vector-only
+        (``skip_kg=True``, process_options contains ``!``), removes the skip-KG
+        flag and re-queues it for processing so entity/relation extraction runs.
+
+        Documents that already have KG built are gracefully skipped.
+        """
+        slot_reserved = False
+        processed: list[str] = []
+        skipped: list[dict[str, str]] = []
+
+        try:
+            # Reserve enqueue slot (same concurrency contract as upload/insert)
+            slot_reserved = await _reserve_enqueue_slot(rag)
+
+            for doc_id in request.doc_ids:
+                success, message = await _build_kg_for_doc(rag, doc_id)
+                if success:
+                    processed.append(doc_id)
+                else:
+                    skipped.append({"doc_id": doc_id, "reason": message})
+
+            if processed:
+                background_tasks.add_task(rag.apipeline_process_enqueue_documents)
+
+            if processed and not skipped:
+                status: Literal["build_kg_batch_started", "build_kg_batch_partial"] = "build_kg_batch_started"
+                msg = f"KG build started for {len(processed)} document(s)"
+            elif processed:
+                status = "build_kg_batch_partial"
+                msg = f"KG build started for {len(processed)} document(s); {len(skipped)} skipped."
+            else:
+                status = "build_kg_batch_partial"
+                msg = f"No documents were eligible. {len(skipped)} skipped."
+
+            return BuildKgBatchResponse(
+                status=status,
+                message=msg,
+                processed=processed,
+                skipped=skipped,
+            )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error building KG batch: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            if slot_reserved:
+                await _release_enqueue_slot(rag)
+
+    @router.post(
+        "/{doc_id}/build_kg",
+        response_model=BuildKgResponse,
+        dependencies=[Depends(combined_auth)],
+    )
+    async def build_kg(
+        doc_id: str,
+        background_tasks: BackgroundTasks,
+    ):
+        """Build knowledge graph for a single document.
+
+        If the document was originally ingested vector-only (``skip_kg=True``,
+        process_options contains ``!``), removes the skip-KG flag and re-queues
+        it for processing so entity/relation extraction runs.
+
+        The pipeline resume logic handles purging old chunks/KG and rebuilding
+        with the updated process_options.
+        """
+        slot_reserved = False
+
+        try:
+            # Reserve enqueue slot (same concurrency contract as upload/insert)
+            slot_reserved = await _reserve_enqueue_slot(rag)
+
+            success, message = await _build_kg_for_doc(rag, doc_id)
+
+            if success:
+                background_tasks.add_task(rag.apipeline_process_enqueue_documents)
+                return BuildKgResponse(
+                    status="build_kg_started",
+                    message=message,
+                    doc_id=doc_id,
+                )
+            else:
+                return BuildKgResponse(
+                    status="not_eligible",
+                    message=message,
+                    doc_id=doc_id,
+                )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error building KG for document {doc_id}: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            if slot_reserved:
+                await _release_enqueue_slot(rag)
 
     return router

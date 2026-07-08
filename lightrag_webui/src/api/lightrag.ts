@@ -260,6 +260,23 @@ export type ReprocessFailedResponse = {
   track_id: string
 }
 
+export type BuildKgResponse = {
+  status: 'build_kg_started' | 'not_eligible'
+  message: string
+  doc_id: string
+}
+
+export type BuildKgBatchRequest = {
+  doc_ids: string[]
+}
+
+export type BuildKgBatchResponse = {
+  status: 'build_kg_batch_started' | 'build_kg_batch_partial'
+  message: string
+  processed: string[]
+  skipped: { doc_id: string; reason: string }[]
+}
+
 export type DeleteDocResponse = {
   status: 'deletion_started' | 'busy' | 'not_allowed'
   message: string
@@ -676,6 +693,16 @@ export const scanNewDocuments = async (): Promise<ScanResponse> => {
 
 export const reprocessFailedDocuments = async (): Promise<ReprocessFailedResponse> => {
   const response = await axiosInstance.post('/documents/reprocess_failed')
+  return response.data
+}
+
+export const buildKg = async (docId: string): Promise<BuildKgResponse> => {
+  const response = await axiosInstance.post(`/documents/${encodeURIComponent(docId)}/build_kg`)
+  return response.data
+}
+
+export const buildKgBatch = async (request: BuildKgBatchRequest): Promise<BuildKgBatchResponse> => {
+  const response = await axiosInstance.post('/documents/build_kg_batch', request)
   return response.data
 }
 

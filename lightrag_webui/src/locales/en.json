@@ -157,6 +157,7 @@
         "fileName": "File Name",
         "summary": "Summary",
         "status": "Status",
+        "mode": "Mode",
         "length": "Length",
         "chunks": "Chunks",
         "created": "Created",
@@ -164,6 +165,14 @@
         "metadata": "Metadata",
         "select": "Select"
       },
+      "mode": {
+        "vector": "Vector",
+        "vectorKg": "Vector + KG"
+      },
+      "buildKgTooltip": "Build Knowledge Graph",
+      "buildKgSuccess": "Knowledge graph build started for document {{docId}}",
+      "buildKgNotEligible": "Cannot build KG: {{reason}}",
+      "buildKgFailed": "Build KG failed:\n{{error}}",
       "filters": {
         "all": "All",
         "completed": "Completed",

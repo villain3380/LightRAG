@@ -31,6 +31,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import {
   scanNewDocuments,
   getDocumentsPaginatedWithTimeout,
+  buildKg,
   DocsStatusesResponse,
   DocStatus,
   DocStatusResponse,
@@ -42,7 +43,7 @@ import { toast } from 'sonner'
 import { useBackendState } from '@/stores/state'
 import { copyToClipboard } from '@/utils/clipboard'
 
-import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, CopyIcon, EyeIcon } from 'lucide-react'
+import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, CopyIcon, EyeIcon, BrainCircuitIcon } from 'lucide-react'
 import PipelineStatusDialog from '@/components/documents/PipelineStatusDialog'
 import ChunkInspector from '@/components/documents/ChunkInspector'
 import {
@@ -114,6 +115,11 @@ const getDisplayFileName = (doc: DocStatusResponse, maxLength: number = 20): str
     ? fileName.slice(0, maxLength) + '...'
     : fileName;
 };
+
+const getIngestionMode = (doc: DocStatusResponse): 'vector' | 'vector_kg' => {
+  const options = doc.metadata?.process_options ?? ''
+  return options.includes('!') ? 'vector' : 'vector_kg'
+}
 
 const formatMetadata = (metadata: Record<string, any>): string => {
   const formattedMetadata = { ...metadata };
@@ -1183,6 +1189,22 @@ export default function DocumentManager() {
     });
   }, [buildQuerySnapshot, enqueueRefresh]);
 
+  const handleBuildKg = useCallback(async (docId: string) => {
+    try {
+      const result = await buildKg(docId)
+      if (result.status === 'build_kg_started') {
+        toast.success(t('documentPanel.documentManager.buildKgSuccess', { docId }))
+        refreshDocumentsThrottled()
+        startActivityProbe('build_kg')
+      } else {
+        toast.error(t('documentPanel.documentManager.buildKgNotEligible', { reason: result.message }))
+      }
+    } catch (err: any) {
+      const msg = errorMessage(err)
+      toast.error(t('documentPanel.documentManager.buildKgFailed', { error: msg }))
+    }
+  }, [t, refreshDocumentsThrottled, startActivityProbe])
+
   useEffect(() => {
     latestRefreshRequestVersionRef.current += 1
   }, [pagination.page, pagination.page_size, statusFilter, sortField, sortDirection])
@@ -1606,6 +1628,7 @@ export default function DocumentManager() {
                           </TableHead>
                           <TableHead>{t('documentPanel.documentManager.columns.summary')}</TableHead>
                           <TableHead>{t('documentPanel.documentManager.columns.status')}</TableHead>
+                          <TableHead>{t('documentPanel.documentManager.columns.mode')}</TableHead>
                           <TableHead>{t('documentPanel.documentManager.columns.length')}</TableHead>
                           <TableHead>{t('documentPanel.documentManager.columns.chunks')}</TableHead>
                           <TableHead
@@ -1696,6 +1719,19 @@ export default function DocumentManager() {
                                 {hasDocumentDetails(doc) && <DocumentStatusDetailsDialog doc={doc} />}
                               </div>
                             </TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-1">
+                                {getIngestionMode(doc) === 'vector' ? (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
+                                    {t('documentPanel.documentManager.mode.vector')}
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300">
+                                    {t('documentPanel.documentManager.mode.vectorKg')}
+                                  </span>
+                                )}
+                              </div>
+                            </TableCell>
                             <TableCell>{doc.content_length ?? '-'}</TableCell>
                             <TableCell>
                               <div className="flex items-center gap-1">
@@ -1711,6 +1747,24 @@ export default function DocumentManager() {
                                     <EyeIcon className="h-4 w-4" />
                                   </Button>
                                 ) : null}
+                                {doc.status === 'processed' && getIngestionMode(doc) === 'vector' && (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-6 w-6"
+                                        disabled={pipelineActive}
+                                        onClick={() => handleBuildKg(doc.id)}
+                                      >
+                                        <BrainCircuitIcon className="h-4 w-4" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>
+                                      {t('documentPanel.documentManager.buildKgTooltip')}
+                                    </TooltipContent>
+                                  </Tooltip>
+                                )}
                               </div>
                             </TableCell>
                             <TableCell className="truncate">

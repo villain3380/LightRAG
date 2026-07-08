@@ -157,6 +157,7 @@
         "fileName": "文件名",
         "summary": "摘要",
         "status": "状态",
+        "mode": "模式",
         "length": "长度",
         "chunks": "分块",
         "created": "创建时间",
@@ -164,6 +165,14 @@
         "metadata": "元数据",
         "select": "选择"
       },
+      "mode": {
+        "vector": "仅向量",
+        "vectorKg": "向量+KG"
+      },
+      "buildKgTooltip": "构建知识图谱",
+      "buildKgSuccess": "文档 {{docId}} 的知识图谱构建已启动",
+      "buildKgNotEligible": "无法构建知识图谱: {{reason}}",
+      "buildKgFailed": "知识图谱构建失败:\n{{error}}",
       "filters": {
         "all": "全部",
         "completed": "已完成",
