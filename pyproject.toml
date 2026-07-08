@@ -166,8 +166,16 @@ observability = [
     "langfuse>=3.8.1",
 ]
 
+mcp = [
+    # MCP (Model Context Protocol) adapter — wraps REST API as MCP stdio server
+    "mcp>=1.0.0",
+    "httpx>=0.28.0",
+    "python-dotenv",
+]
+
 [project.scripts]
 lightrag-server = "lightrag.api.lightrag_server:main"
+lightrag-mcp-server = "lightrag.mcp.server:main"
 lightrag-gunicorn = "lightrag.api.run_with_gunicorn:main"
 lightrag-hash-password = "lightrag.tools.hash_password:main"
 lightrag-download-cache = "lightrag.tools.download_cache:main"
