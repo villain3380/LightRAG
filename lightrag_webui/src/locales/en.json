@@ -436,6 +436,15 @@
     "emptyGraph": "Empty(Try Reload Again)"
   },
   "retrievePanel": {
+    "citation": {
+      "source": "Source",
+      "backToSettings": "Back to settings",
+      "noContent": "No chunk content available (enable include_chunk_content).",
+      "chunkNumber": "Chunk #{{n}}",
+      "copyChunkId": "Copy chunk ID",
+      "copied": "Chunk ID copied",
+      "copyFailed": "Copy failed"
+    },
     "chatMessage": {
       "copyTooltip": "Copy to clipboard",
       "copyError": "Failed to copy text to clipboard",

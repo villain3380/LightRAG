@@ -130,8 +130,16 @@ export default function TracesView() {
     setLoading(true)
     try {
       const res = await listTraces()
-      setTraces(res.traces || [])
+      console.log('[TracesView] listTraces response:', res)
+      console.log('[TracesView] traces array:', res?.traces)
+      if (res && res.traces) {
+        setTraces(res.traces)
+      } else {
+        console.warn('[TracesView] no traces field in response, setting empty')
+        setTraces([])
+      }
     } catch (err) {
+      console.error('[TracesView] fetch failed:', err)
       toast.error(t('traces.errors.fetchListFailed', { error: errorMessage(err) }))
     } finally {
       setLoading(false)

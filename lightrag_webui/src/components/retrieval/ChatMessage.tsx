@@ -1,5 +1,5 @@
 import { ComponentProps, ReactNode, useEffect, useMemo, useRef, memo, useState } from 'react' // Import useMemo
-import { Message } from '@/api/lightrag'
+import { Message, type ReferenceItem } from '@/api/lightrag'
 import useTheme from '@/hooks/useTheme'
 import { cn } from '@/lib/utils'
 
@@ -52,7 +52,8 @@ export const ChatMessage = ({
   message,
   isTabActive = true,
   activeProgress = null,
-  isQuerying = false
+  isQuerying = false,
+  onCitationClick
 }: {
   message: MessageWithError
   isTabActive?: boolean
@@ -61,6 +62,7 @@ export const ChatMessage = ({
   // finally/stop handler). Drives the clock's spin so it animates for the whole
   // query, not just the thinking phase.
   isQuerying?: boolean
+  onCitationClick?: (ref: ReferenceItem) => void
 }) => {
   const { t } = useTranslation()
   const { theme } = useTheme()
@@ -154,8 +156,27 @@ export const ChatMessage = ({
     h4: ({ children }: { children?: ReactNode }) => <h4 className="text-base font-semibold mt-3 mb-2">{children}</h4>,
     ul: ({ children }: { children?: ReactNode }) => <ul className="list-disc pl-5 my-2">{children}</ul>,
     ol: ({ children }: { children?: ReactNode }) => <ol className="list-decimal pl-5 my-2">{children}</ol>,
-    li: ({ children }: { children?: ReactNode }) => <li className="my-1">{children}</li>
-  }), [message.mermaidRendered, message.role]);
+    li: ({ children }: { children?: ReactNode }) => <li className="my-1">{children}</li>,
+    a: ({ href, children }: { href?: string; children?: ReactNode }) => {
+      if (href && href.startsWith('#footnote-')) {
+        const refId = href.replace('#footnote-', '')
+        return (
+          <a
+            href="#"
+            onClick={(e) => {
+              e.preventDefault()
+              const ref = message.references?.find((r) => r.reference_id === refId)
+              if (ref) onCitationClick?.(ref)
+            }}
+            className="cursor-pointer text-blue-500 hover:underline"
+          >
+            {children}
+          </a>
+        )
+      }
+      return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+    }
+  }), [message.mermaidRendered, message.role, message.references, onCitationClick]);
 
   const thinkingMarkdownComponents = useMemo(() => ({
     code: (props: any) => (<CodeHighlight {...props} renderAsDiagram={message.mermaidRendered ?? false} messageRole={message.role} />)

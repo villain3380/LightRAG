@@ -436,6 +436,15 @@
     "emptyGraph": "无数据(请重载图形数据)"
   },
   "retrievePanel": {
+    "citation": {
+      "source": "来源",
+      "backToSettings": "返回参数设置",
+      "noContent": "无 chunk 内容（需开启 include_chunk_content）。",
+      "chunkNumber": "第 {{n}} 个 chunk",
+      "copyChunkId": "复制 chunk ID",
+      "copied": "chunk ID 已复制",
+      "copyFailed": "复制失败"
+    },
     "chatMessage": {
       "copyTooltip": "复制到剪贴板",
       "copyError": "复制文本到剪贴板失败",

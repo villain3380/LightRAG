@@ -4,7 +4,7 @@ import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeRaw from 'rehype-raw'
-import { XIcon, Loader2Icon, FileTextIcon, LayersIcon } from 'lucide-react'
+import { XIcon, Loader2Icon, FileTextIcon, LayersIcon, CopyIcon } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
 import { getDocumentChunks, type DocStatusResponse, type DocumentChunksResponse } from '@/api/lightrag'
@@ -131,7 +131,10 @@ export default function ChunkInspector({ doc, onClose }: ChunkInspectorProps) {
               {chunks.map((chunk) => (
                 <div key={chunk.chunk_id} className="rounded-md border">
                   <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground">
-                    <span className="font-mono">chunk id: {chunk.chunk_id.slice(0, 16)}</span>
+                    <span className="font-mono truncate" title={chunk.chunk_id}>chunk id: {chunk.chunk_id}</span>
+                    <Button variant="ghost" size="icon" className="h-5 w-5 shrink-0" onClick={() => navigator.clipboard.writeText(chunk.chunk_id)} title="Copy chunk ID">
+                      <CopyIcon className="h-3 w-3" />
+                    </Button>
                     <span>
                       {t('documentPanel.chunkInspector.order')} {chunk.order_index} · {t('documentPanel.chunkInspector.tokens')} {chunk.tokens}
                     </span>

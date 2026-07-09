@@ -185,6 +185,14 @@ class ReferenceItem(BaseModel):
 
     reference_id: str = Field(description="Unique reference identifier")
     file_path: str = Field(description="Path to the source file")
+    chunk_id: Optional[str] = Field(
+        default=None,
+        description="Chunk ID of the cited chunk (per-chunk references).",
+    )
+    order_index: Optional[int] = Field(
+        default=None,
+        description="Zero-based index of the chunk within its source document.",
+    )
     content: Optional[List[str]] = Field(
         default=None,
         description="List of chunk contents from this file (only present when include_chunk_content=True)",
@@ -251,6 +259,64 @@ class StreamChunkResponse(BaseModel):
         default=None,
         description="Total server-side processing time in seconds (final metadata line when include_progress=True)",
     )
+
+
+async def _enrich_references(
+    rag,
+    references: list[dict],
+    chunks: list[dict],
+    include_chunk_content: bool,
+) -> list[dict]:
+    """Attach chunk content (if requested) and chunk_order_index to references.
+
+    ``chunk_order_index`` (the chunk's 0-based position in its source document)
+    is looked up from the text_chunks KV store by ``chunk_id``; it is not
+    returned by the vector query, so a KV lookup is required.
+    """
+    ref_id_to_content: dict[str, list[str]] = {}
+    ref_id_to_chunk_id: dict[str, str] = {}
+    for chunk in chunks:
+        ref_id = chunk.get("reference_id", "")
+        if not ref_id:
+            continue
+        content = chunk.get("content", "")
+        if content:
+            ref_id_to_content.setdefault(ref_id, []).append(content)
+        if chunk.get("chunk_id"):
+            ref_id_to_chunk_id[ref_id] = chunk["chunk_id"]
+
+    # Collect unique chunk_ids across references (and chunks fallback).
+    chunk_ids: list[str] = []
+    seen: set[str] = set()
+    for ref in references:
+        cid = ref.get("chunk_id") or ref_id_to_chunk_id.get(ref.get("reference_id", ""), "")
+        if cid and cid not in seen:
+            seen.add(cid)
+            chunk_ids.append(cid)
+
+    order_index_map: dict[str, int] = {}
+    if chunk_ids:
+        try:
+            kv_list = await rag.text_chunks.get_by_ids(chunk_ids)
+            for cid, data in zip(chunk_ids, kv_list):
+                if isinstance(data, dict) and data.get("chunk_order_index") is not None:
+                    order_index_map[cid] = data["chunk_order_index"]
+        except Exception:
+            logger.warning(
+                "Failed to look up chunk_order_index for references", exc_info=True
+            )
+
+    enriched: list[dict] = []
+    for ref in references:
+        ref_copy = ref.copy()
+        ref_id = ref.get("reference_id", "")
+        if include_chunk_content and ref_id in ref_id_to_content:
+            ref_copy["content"] = ref_id_to_content[ref_id]
+        cid = ref_copy.get("chunk_id") or ref_id_to_chunk_id.get(ref_id, "")
+        if cid and cid in order_index_map:
+            ref_copy["order_index"] = order_index_map[cid]
+        enriched.append(ref_copy)
+    return enriched
 
 
 def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
@@ -488,28 +554,14 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             if not response_content:
                 response_content = "No relevant context found for the query."
 
-            # Enrich references with chunk content if requested
-            if request.include_references and request.include_chunk_content:
-                chunks = data.get("chunks", [])
-                # Create a mapping from reference_id to chunk content
-                ref_id_to_content = {}
-                for chunk in chunks:
-                    ref_id = chunk.get("reference_id", "")
-                    content = chunk.get("content", "")
-                    if ref_id and content:
-                        # Collect chunk content; join later to avoid quadratic string concatenation
-                        ref_id_to_content.setdefault(ref_id, []).append(content)
-
-                # Add content to references
-                enriched_references = []
-                for ref in references:
-                    ref_copy = ref.copy()
-                    ref_id = ref.get("reference_id", "")
-                    if ref_id in ref_id_to_content:
-                        # Keep content as a list of chunks (one file may have multiple chunks)
-                        ref_copy["content"] = ref_id_to_content[ref_id]
-                    enriched_references.append(ref_copy)
-                references = enriched_references
+            # Enrich references with chunk content (if requested) + order_index
+            if request.include_references:
+                references = await _enrich_references(
+                    rag,
+                    references,
+                    data.get("chunks", []),
+                    request.include_chunk_content,
+                )
 
             # Return response with or without references based on request
             if request.include_references:
@@ -548,25 +600,14 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             references = result.get("data", {}).get("references", [])
             llm_response = result.get("llm_response", {})
 
-            # Enrich references with chunk content if requested
-            if include_references and include_chunk_content:
-                data = result.get("data", {})
-                chunks = data.get("chunks", [])
-                ref_id_to_content: dict[str, list[str]] = {}
-                for chunk in chunks:
-                    ref_id = chunk.get("reference_id", "")
-                    content = chunk.get("content", "")
-                    if ref_id and content:
-                        ref_id_to_content.setdefault(ref_id, []).append(content)
-
-                enriched_references = []
-                for ref in references:
-                    ref_copy = ref.copy()
-                    ref_id = ref.get("reference_id", "")
-                    if ref_id in ref_id_to_content:
-                        ref_copy["content"] = ref_id_to_content[ref_id]
-                    enriched_references.append(ref_copy)
-                references = enriched_references
+            # Enrich references with chunk content (if requested) + order_index
+            if include_references:
+                references = await _enrich_references(
+                    rag,
+                    references,
+                    result.get("data", {}).get("chunks", []),
+                    include_chunk_content,
+                )
 
             if llm_response.get("is_streaming"):
                 # Streaming: references first, then response chunks

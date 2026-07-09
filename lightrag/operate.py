@@ -4100,6 +4100,31 @@ async def kg_query(
     ll_keywords_str = ", ".join(ll_keywords) if ll_keywords else ""
     hl_keywords_str = ", ".join(hl_keywords) if hl_keywords else ""
 
+    # ── retrieval trace ──
+    trace: dict | None = None
+    if query_param.enable_trace:
+        from hashlib import md5
+        from datetime import datetime, timezone
+
+        ts = datetime.now(timezone.utc)
+        qhash = md5(query.encode()).hexdigest()[:8]
+        trace = {
+            "trace_id": f"trace_{ts.strftime('%Y%m%d_%H%M%S')}_{qhash}",
+            "timestamp": ts.isoformat(),
+            "query": query,
+            "mode": query_param.mode,
+            "weights": {
+                "dense": query_param.dense_weight,
+                "sparse": query_param.sparse_weight,
+            },
+            "keywords": {
+                "high_level": hl_keywords,
+                "low_level": ll_keywords,
+            },
+            "entities": None,
+            "relations": None,
+        }
+
     # Build query context (unified interface)
     context_result = await _build_query_context(
         query,
@@ -4116,10 +4141,45 @@ async def kg_query(
 
     if context_result is None:
         logger.info("[kg_query] No query context could be built; returning no-result.")
+        if trace is not None:
+            try:
+                from lightrag.api.routers.trace_routes import save_trace
+
+                save_trace(global_config["working_dir"], trace)
+            except Exception:
+                logger.warning("failed to save retrieval trace", exc_info=True)
         return None
+
+    # Populate trace with KG entities / relations from raw_data
+    if trace is not None:
+        try:
+            data = context_result.raw_data.get("data", {})
+            trace["entities"] = data.get("entities", []) or None
+            trace["relations"] = data.get("relationships", []) or None
+            chunks = data.get("chunks", []) or []
+            trace["final_context"] = {
+                "vector_chunks": [
+                    {
+                        "chunk_id": c.get("chunk_id"),
+                        "file_path": c.get("file_path"),
+                        "content_preview": (c.get("content") or "")[:120],
+                    }
+                    for c in chunks
+                ],
+                "total_chunks": len(chunks),
+            }
+        except Exception:
+            logger.warning("failed to populate kg trace", exc_info=True)
 
     # Return different content based on query parameters
     if query_param.only_need_context and not query_param.only_need_prompt:
+        if trace is not None:
+            try:
+                from lightrag.api.routers.trace_routes import save_trace
+
+                save_trace(global_config["working_dir"], trace)
+            except Exception:
+                logger.warning("failed to save retrieval trace", exc_info=True)
         return QueryResult(
             content=context_result.context, raw_data=context_result.raw_data
         )
@@ -4142,8 +4202,23 @@ async def kg_query(
     user_query = query
 
     if query_param.only_need_prompt:
+        if trace is not None:
+            try:
+                from lightrag.api.routers.trace_routes import save_trace
+
+                save_trace(global_config["working_dir"], trace)
+            except Exception:
+                logger.warning("failed to save retrieval trace", exc_info=True)
         prompt_content = "\n\n".join([sys_prompt, "---User Query---", user_query])
         return QueryResult(content=prompt_content, raw_data=context_result.raw_data)
+
+    if trace is not None:
+        try:
+            from lightrag.api.routers.trace_routes import save_trace
+
+            save_trace(global_config["working_dir"], trace)
+        except Exception:
+            logger.warning("failed to save retrieval trace", exc_info=True)
 
     # Call LLM
     tokenizer: Tokenizer = global_config["tokenizer"]

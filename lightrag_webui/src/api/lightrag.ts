@@ -179,6 +179,7 @@ export type Message = {
   thinkingTime?: number | null
   responseTime?: number | null
   firstTokenTime?: number | null
+  references?: ReferenceItem[]
 }
 
 export type QueryRequest = {
@@ -222,11 +223,22 @@ export type QueryRequest = {
   include_progress?: boolean
   /** If True, save a detailed retrieval trace (A/B/C-path rankings) to {working_dir}/traces/. Default False (zero overhead). */
   enable_trace?: boolean
+  /** If True, include chunk text content in references (for clickable citations). */
+  include_chunk_content?: boolean
+}
+
+export type ReferenceItem = {
+  reference_id: string
+  file_path: string
+  chunk_id?: string
+  order_index?: number
+  content?: string[]
 }
 
 export type QueryResponse = {
   response: string
   response_time?: number
+  references?: ReferenceItem[]
 }
 
 export type EntityUpdateResponse = {
@@ -743,7 +755,8 @@ async function _readNdjsonStream(
   onChunk: (chunk: string) => void,
   onError: ((error: string) => void) | undefined,
   onResponseTime?: (seconds: number) => void,
-  onProgress?: (event: string) => void
+  onProgress?: (event: string) => void,
+  onReferences?: (refs: ReferenceItem[]) => void
 ): Promise<void> {
   if (!response.body) {
     throw new Error('Response body is null');
@@ -770,7 +783,9 @@ async function _readNdjsonStream(
 
         try {
           const parsed = JSON.parse(trimmed);
-          if (parsed.response) {
+          if (parsed.references) {
+            onReferences?.(parsed.references as ReferenceItem[]);
+          } else if (parsed.response) {
             onChunk(parsed.response);
           } else if (parsed.error) {
             onError?.(parsed.error);
@@ -801,7 +816,9 @@ async function _readNdjsonStream(
   if (buffer.trim()) {
     try {
       const parsed = JSON.parse(buffer);
-      if (parsed.response) {
+      if (parsed.references) {
+        onReferences?.(parsed.references as ReferenceItem[]);
+      } else if (parsed.response) {
         onChunk(parsed.response);
       } else if (parsed.error) {
         onError?.(parsed.error);
@@ -918,7 +935,8 @@ export const queryTextStream = async (
   onError?: (error: string) => void,
   signal?: AbortSignal,
   onResponseTime?: (seconds: number) => void,
-  onProgress?: (event: string) => void
+  onProgress?: (event: string) => void,
+  onReferences?: (refs: ReferenceItem[]) => void
 ) => {
   const headers = _buildStreamHeaders();
 
@@ -997,7 +1015,7 @@ export const queryTextStream = async (
     }
 
     // --- Read the NDJSON stream (happy path or refreshed retry) ------------
-    await _readNdjsonStream(activeResponse, onChunk, onError, onResponseTime, onProgress);
+    await _readNdjsonStream(activeResponse, onChunk, onError, onResponseTime, onProgress, onReferences);
   } catch (error) {
     const classified = _classifyStreamError(error, signal);
     if (classified === null) {

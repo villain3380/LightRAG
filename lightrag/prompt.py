@@ -347,8 +347,8 @@ Consider the conversation history if provided to maintain conversational flow an
   - Carefully determine the user's query intent in the context of the conversation history to fully understand the user's information need.
   - Scrutinize both `Knowledge Graph Data` and `Document Chunks` in the **Context**. Identify and extract all pieces of information that are directly relevant to answering the user query.
   - Weave the extracted facts into a coherent and logical response. Your own knowledge must ONLY be used to formulate fluent sentences and connect ideas, NOT to introduce any external information.
-  - Track the reference_id of the document chunk which directly support the facts presented in the response. Correlate reference_id with the entries in the `Reference Document List` to generate the appropriate citations.
-  - Generate a references section at the end of the response. Each reference document must directly support the facts presented in the response.
+  - Insert an inline footnote marker `[^n]` immediately after each fact or sentence supported by source chunk n (n = the chunk's reference_id from the Document Chunks). Place it right after the relevant statement. Example: "LightRAG supports four retrieval modes[^1]."
+  - Generate a references section at the end listing every source chunk you cited inline.
   - Do not generate anything after the reference section.
 
 2. Content & Grounding:
@@ -362,19 +362,20 @@ Consider the conversation history if provided to maintain conversational flow an
 
 4. References Section Format:
   - The References section should be under heading: `### References`
-  - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a caret (`^`) after opening square bracket (`[`).
+  - Reference list entries should adhere to the format: `- [^n] Document Title` (the `[^n]` must match the inline marker).
   - The Document Title in the citation must retain its original language.
-  - Output each citation on an individual line
-  - Provide maximum of 5 most relevant citations.
-  - Do not generate footnotes section or any comment, summary, or explanation after the references.
+  - Output each citation on an individual line.
+  - Cite every source chunk you actually used; do not cite chunks you did not use.
+  - Do not generate any comment, summary, or explanation after the references.
 
 5. Reference Section Example:
 ```
+LightRAG supports four retrieval modes[^1]. The naive mode is vector-only[^2].
+
 ### References
 
-- [1] Document Title One
-- [2] Document Title Two
-- [3] Document Title Three
+- [^1] Document Title One
+- [^2] Document Title Two
 ```
 
 6. Additional Instructions: {user_prompt}
@@ -401,8 +402,8 @@ Consider the conversation history if provided to maintain conversational flow an
   - Carefully determine the user's query intent in the context of the conversation history to fully understand the user's information need.
   - Scrutinize `Document Chunks` in the **Context**. Identify and extract all pieces of information that are directly relevant to answering the user query.
   - Weave the extracted facts into a coherent and logical response. Your own knowledge must ONLY be used to formulate fluent sentences and connect ideas, NOT to introduce any external information.
-  - Track the reference_id of the document chunk which directly support the facts presented in the response. Correlate reference_id with the entries in the `Reference Document List` to generate the appropriate citations.
-  - Generate a **References** section at the end of the response. Each reference document must directly support the facts presented in the response.
+  - Insert an inline footnote marker `[^n]` immediately after each fact or sentence supported by source chunk n (n = the chunk's reference_id from the Document Chunks). Place it right after the relevant statement. Example: "LightRAG supports four retrieval modes[^1]."
+  - Generate a **References** section at the end listing every source chunk you cited inline.
   - Do not generate anything after the reference section.
 
 2. Content & Grounding:
@@ -416,19 +417,20 @@ Consider the conversation history if provided to maintain conversational flow an
 
 4. References Section Format:
   - The References section should be under heading: `### References`
-  - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a caret (`^`) after opening square bracket (`[`).
+  - Reference list entries should adhere to the format: `- [^n] Document Title` (the `[^n]` must match the inline marker).
   - The Document Title in the citation must retain its original language.
-  - Output each citation on an individual line
-  - Provide maximum of 5 most relevant citations.
-  - Do not generate footnotes section or any comment, summary, or explanation after the references.
+  - Output each citation on an individual line.
+  - Cite every source chunk you actually used; do not cite chunks you did not use.
+  - Do not generate any comment, summary, or explanation after the references.
 
 5. Reference Section Example:
 ```
+LightRAG supports four retrieval modes[^1]. The naive mode is vector-only[^2].
+
 ### References
 
-- [1] Document Title One
-- [2] Document Title Two
-- [3] Document Title Three
+- [^1] Document Title One
+- [^2] Document Title Two
 ```
 
 6. Additional Instructions: {user_prompt}

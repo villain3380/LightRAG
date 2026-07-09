@@ -3,11 +3,12 @@ import Input from '@/components/ui/Input'
 import Button from '@/components/ui/Button'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { throttle } from '@/lib/utils'
-import { queryText, queryTextStream } from '@/api/lightrag'
+import { queryText, queryTextStream, type ReferenceItem } from '@/api/lightrag'
 import { errorMessage } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settings'
 import { useDebounce } from '@/hooks/useDebounce'
 import QuerySettings from '@/components/retrieval/QuerySettings'
+import ChunkSourceView from '@/components/retrieval/ChunkSourceView'
 import { ChatMessage, MessageWithError } from '@/components/retrieval/ChatMessage'
 import { EraserIcon, SendIcon, CopyIcon, SquareIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -402,7 +403,8 @@ export default function RetrievalView() {
               latexRendered: assistantMessage.latexRendered,
               thinkingTime: assistantMessage.thinkingTime,
               responseTime: assistantMessage.responseTime,
-              firstTokenTime: assistantMessage.firstTokenTime
+              firstTokenTime: assistantMessage.firstTokenTime,
+              references: assistantMessage.references
             })
           }
           return newMessages
@@ -436,6 +438,7 @@ export default function RetrievalView() {
       const queryParams = {
         ...state.querySettings,
         query: actualQuery,
+        include_chunk_content: true,
         response_type: 'Multiple Paragraphs',
         // Request retrieval progress events for the live progress display.
         include_progress: true,
@@ -450,6 +453,14 @@ export default function RetrievalView() {
 
       try {
         // Run query
+        const setAssistantReferences = (refs: ReferenceItem[]) => {
+          assistantMessage.references = refs
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessage.id ? { ...m, references: refs } : m
+            )
+          )
+        }
         if (state.querySettings.stream) {
           let errorMessage = ''
           await queryTextStream(
@@ -467,7 +478,8 @@ export default function RetrievalView() {
             },
             (event) => {
               setQueryProgress(event)
-            }
+            },
+            setAssistantReferences
           )
           if (errorMessage) {
             if (assistantMessage.content) {
@@ -481,6 +493,9 @@ export default function RetrievalView() {
             serverResponseTimeRef.current = response.response_time
           }
           updateAssistantMessage(response.response)
+          if (response.references) {
+            setAssistantReferences(response.references)
+          }
         }
       } catch (err) {
         // If the user terminated the query, handleStop already finalized the
@@ -934,9 +949,31 @@ export default function RetrievalView() {
     }
   }, [t])
 
+  // ── resizable right pane + citation viewer ──
+  const [rightPct, setRightPct] = useState(25)
+  const [activeCitation, setActiveCitation] = useState<ReferenceItem | null>(null)
+
+  const startDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    const onMove = (ev: MouseEvent) => {
+      const pct = ((window.innerWidth - ev.clientX) / window.innerWidth) * 100
+      setRightPct(Math.min(85, Math.max(15, pct)))
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [])
+
+  const handleCitationClick = useCallback((ref: ReferenceItem) => {
+    setActiveCitation(ref)
+  }, [])
+
   return (
-    <div className="flex size-full gap-2 px-2 pb-12 overflow-hidden">
-      <div className="flex grow flex-col gap-4">
+    <div className="flex size-full px-2 pb-12 overflow-hidden">
+      <div className="flex flex-col gap-4 min-w-0" style={{ width: `${100 - rightPct}%` }}>
         <div className="relative grow">
           <div
             ref={messagesContainerRef}
@@ -980,6 +1017,7 @@ export default function RetrievalView() {
                           message.role === 'assistant' &&
                           isLoading
                         }
+                        onCitationClick={handleCitationClick}
                       />
                       {message.role === 'assistant' && (
                         <Button
@@ -1084,7 +1122,22 @@ export default function RetrievalView() {
           )}
         </form>
       </div>
-      <QuerySettings />
+      {/* draggable divider between chat and right pane */}
+      <div
+        onMouseDown={startDrag}
+        className="w-1 shrink-0 cursor-col-resize bg-border/60 hover:bg-primary/40 transition-colors"
+      />
+      {/* right pane: settings / source chunk (shared width, draggable) */}
+      <div className="flex flex-col min-w-0" style={{ width: `${rightPct}%` }}>
+        {activeCitation ? (
+          <ChunkSourceView
+            citation={activeCitation}
+            onClose={() => setActiveCitation(null)}
+          />
+        ) : (
+          <QuerySettings />
+        )}
+      </div>
     </div>
   )
 }
