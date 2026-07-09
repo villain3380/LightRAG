@@ -11,6 +11,7 @@
     "knowledgeGraph": "Knowledge Graph",
     "retrieval": "Retrieval",
     "api": "API",
+    "traces": "Traces",
     "projectRepository": "Project Repository",
     "logout": "Logout",
     "frontendNeedsRebuild": "Frontend needs rebuild",
@@ -517,6 +518,8 @@
       "onlyNeedPromptTooltip": "If True, only returns the generated prompt without producing a response",
       "streamResponse": "Stream Response",
       "streamResponseTooltip": "If True, enables streaming output for real-time responses",
+      "enableTrace": "Retrieval Trace",
+      "enableTraceTooltip": "If True, save a detailed retrieval trace (A/B/C-path rankings) as a JSON file for later inspection in the Traces panel. Adds 1–2 extra vector searches per query.",
       "userPrompt": "Additional Output Prompt",
       "userPromptTooltip": "Provide additional response requirements to the LLM (unrelated to query content, only for output processing).",
       "userPromptPlaceholder": "Enter custom prompt (optional)",
@@ -541,5 +544,33 @@
     "prevPage": "Previous Page",
     "nextPage": "Next Page",
     "lastPage": "Last Page"
+  },
+  "traces": {
+    "title": "Retrieval Traces",
+    "refresh": "Refresh",
+    "clearAll": "Clear All",
+    "clearAllConfirm": "Delete all traces?",
+    "clearAllDone": "All traces deleted",
+    "delete": "Delete trace",
+    "close": "Close",
+    "empty": "No traces yet. Enable trace in query settings.",
+    "selectHint": "Select a trace from the sidebar to inspect.",
+    "noData": "No data",
+    "keywords": "Keywords",
+    "highLevel": "High-level",
+    "lowLevel": "Low-level",
+    "dense": "A: Dense",
+    "sparse": "B: Sparse",
+    "fused": "A+B Fused",
+    "vectorRankings": "Vector Ranking (A · B · A+B)",
+    "kgRankings": "KG Chunks (C)",
+    "finalContext": "Final Context",
+    "chunksSent": "chunks sent to LLM",
+    "errors": {
+      "fetchListFailed": "Failed to load traces: {{error}}",
+      "fetchDetailFailed": "Failed to load trace detail: {{error}}",
+      "deleteFailed": "Failed to delete trace: {{error}}",
+      "clearAllFailed": "Failed to clear traces: {{error}}"
+    }
   }
 }

@@ -547,6 +547,27 @@ export default function QuerySettings() {
                   onCheckedChange={(checked) => handleChange('stream', checked)}
                 />
               </div>
+
+              <div className="flex items-center gap-2">
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <label htmlFor="enable_trace" className="flex-1 ml-1 cursor-help">
+                        {t('retrievePanel.querySettings.enableTrace')}
+                      </label>
+                    </TooltipTrigger>
+                    <TooltipContent side="left">
+                      <p>{t('retrievePanel.querySettings.enableTraceTooltip')}</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                <Checkbox
+                  className="mr-10 cursor-pointer"
+                  id="enable_trace"
+                  checked={querySettings.enable_trace}
+                  onCheckedChange={(checked) => handleChange('enable_trace', checked)}
+                />
+              </div>
             </>
 
           </div>

@@ -2491,6 +2491,36 @@ class MilvusVectorDBStorage(BaseVectorStorage):
             for dp in results[0]
         ]
 
+    async def _pure_sparse_search(
+        self, sparse_vec: dict[int, float], top_k: int
+    ) -> list[dict[str, Any]]:
+        """Pure sparse (lexical) search — no dense component.
+
+        Used for retrieval tracing (B-path ranking).  Requires
+        ``sparse_enabled``.  Returns the same shape as :meth:`query`.
+        """
+        self._ensure_collection_loaded()
+        results = self._client.search(
+            collection_name=self.final_namespace,
+            data=[sparse_vec],
+            anns_field="sparse_vector",
+            limit=top_k,
+            output_fields=list(self.meta_fields),
+            search_params={
+                "metric_type": "IP",
+                "params": {"drop_ratio_search": 0.0},
+            },
+        )
+        return [
+            {
+                **dp["entity"],
+                "id": dp["id"],
+                "distance": dp.get("distance"),
+                "created_at": dp.get("created_at"),
+            }
+            for dp in results[0]
+        ]
+
     @staticmethod
     def _build_upsert_batches(
         records: list[dict[str, Any]],

@@ -122,6 +122,12 @@ class QueryParam:
     sparse_weight: float = float(os.getenv("HYBRID_SPARSE_WEIGHT", "0.5"))
     """Weight of the sparse vector in hybrid chunk retrieval. See ``dense_weight``."""
 
+    enable_trace: bool = False
+    """If True, collect detailed retrieval trace data (keywords, entities, A/B/C-path
+    chunk rankings) and save as a JSON file in ``{working_dir}/traces/`` for
+    later inspection via the Trace Viewer UI. Adds a small overhead (1–2 extra
+    vector searches per query). Default False (zero overhead)."""
+
     max_entity_tokens: int = get_env_value(
         "MAX_ENTITY_TOKENS", DEFAULT_MAX_ENTITY_TOKENS, int
     )

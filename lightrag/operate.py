@@ -4496,31 +4496,29 @@ async def _get_vector_context(
     chunks_vdb: BaseVectorStorage,
     query_param: QueryParam,
     query_embedding: list[float] = None,
+    trace: dict | None = None,
 ) -> list[dict]:
     """
     Retrieve text chunks from the vector database without reranking or truncation.
 
-    This function performs vector search to find relevant text chunks for a query.
-    Reranking and truncation will be handled later in the unified processing.
+    When ``trace`` is a dict and ``chunks_vdb.sparse_enabled`` is True, this
+    function also collects **A-path** (pure dense) and **B-path** (pure sparse)
+    rankings and a cross-referenced fused ranking into the trace dict so the
+    Trace Viewer can show per-path chunk ordering.
 
     Args:
         query: The query string to search for
         chunks_vdb: Vector database containing document chunks
         query_param: Query parameters including chunk_top_k and ids
-        query_embedding: Optional pre-computed query embedding to avoid redundant embedding calls
-
-    Returns:
-        List of text chunks with metadata
+        query_embedding: Optional pre-computed query embedding.
+        trace: Optional mutable dict to collect per-path rankings.
     """
     try:
-        # Use chunk_top_k if specified, otherwise fall back to top_k
         search_top_k = query_param.chunk_top_k or query_param.top_k
         cosine_threshold = chunks_vdb.cosine_better_than_threshold
+        sparse_enabled = getattr(chunks_vdb, "sparse_enabled", False)
 
-        if getattr(chunks_vdb, "sparse_enabled", False):
-            # Mode 2: dense + sparse hybrid retrieval on chunks. Weights come
-            # from QueryParam (dense_weight/sparse_weight), defaulting to 0.5/0.5;
-            # sparse_weight=0 short-circuits to dense-only inside query_hybrid.
+        if sparse_enabled:
             results = await chunks_vdb.query_hybrid(
                 query,
                 top_k=search_top_k,
@@ -4532,6 +4530,58 @@ async def _get_vector_context(
             results = await chunks_vdb.query(
                 query, top_k=search_top_k, query_embedding=query_embedding
             )
+
+        # ── trace: collect A/B-path rankings ──
+        if trace is not None and sparse_enabled:
+            # Pre-compute dense+sparse vectors once; reuse for all three searches.
+            emb_res = await chunks_vdb.embedding_func.aembed(
+                [query], context="query", with_sparse=True
+            )
+            dvec = emb_res.dense[0].tolist()
+            svec: dict[int, float] = emb_res.sparse[0] if emb_res.sparse else {}
+
+            # A-path: pure dense
+            dense_raw = await chunks_vdb.query(
+                query, top_k=search_top_k, query_embedding=dvec
+            )
+            # B-path: pure sparse
+            sparse_raw = await chunks_vdb._pure_sparse_search(svec, search_top_k)
+
+            def _rank_path(raw: list, max_k: int) -> list[dict]:
+                out: list[dict] = []
+                for i, r in enumerate(raw):
+                    cid = r.get("id") or r.get("chunk_id", "")
+                    if not cid:
+                        continue
+                    out.append({
+                        "rank": i + 1,
+                        "chunk_id": cid,
+                        "file_path": r.get("file_path", ""),
+                        "distance": r.get("distance"),
+                        "content_preview": (r.get("content") or "")[:120],
+                    })
+                return out[:max_k]
+
+            trace["path_a_dense_ranking"] = _rank_path(dense_raw, search_top_k)
+            trace["path_b_sparse_ranking"] = _rank_path(sparse_raw, search_top_k)
+
+            # Cross-reference: for each fused result, find its A/B-path ranks.
+            dense_rmap = {r["id"]: i + 1 for i, r in enumerate(dense_raw) if r.get("id")}
+            sparse_rmap = {r["id"]: i + 1 for i, r in enumerate(sparse_raw) if r.get("id")}
+            fused: list[dict] = []
+            for r in results:
+                cid = r.get("id", "")
+                fused.append({
+                    "rank": len(fused) + 1,
+                    "chunk_id": cid,
+                    "file_path": r.get("file_path", ""),
+                    "dense_rank": dense_rmap.get(cid),
+                    "sparse_rank": sparse_rmap.get(cid),
+                    "distance": r.get("distance"),
+                    "content_preview": (r.get("content") or "")[:120],
+                })
+            trace["path_ab_fused_ranking"] = fused
+
         if not results:
             logger.info(
                 f"Naive query: 0 chunks (chunk_top_k:{search_top_k} cosine:{cosine_threshold})"
@@ -6048,7 +6098,29 @@ async def naive_query(
 
     if progress_callback:
         await progress_callback(QueryProgress.RETRIEVING_CHUNKS)
-    chunks = await _get_vector_context(query, chunks_vdb, query_param, None)
+    # ── retrieval trace ──
+    trace: dict | None = None
+    if query_param.enable_trace:
+        from hashlib import md5
+        from datetime import datetime, timezone
+
+        ts = datetime.now(timezone.utc)
+        qhash = md5(query.encode()).hexdigest()[:8]
+        trace = {
+            "trace_id": f"trace_{ts.strftime('%Y%m%d_%H%M%S')}_{qhash}",
+            "timestamp": ts.isoformat(),
+            "query": query,
+            "mode": "naive",
+            "weights": {
+                "dense": query_param.dense_weight,
+                "sparse": query_param.sparse_weight,
+            },
+            "keywords": None,
+            "entities": None,
+            "relations": None,
+        }
+
+    chunks = await _get_vector_context(query, chunks_vdb, query_param, None, trace=trace)
 
     if chunks is None or len(chunks) == 0:
         logger.info(
@@ -6115,6 +6187,20 @@ async def naive_query(
         processed_chunks
     )
 
+    if trace is not None:
+        trace["final_context"] = {
+            "vector_chunks": [
+                {
+                    "chunk_id": c.get("chunk_id") or c.get("id", ""),
+                    "file_path": c.get("file_path", ""),
+                    "content_preview": (c.get("content") or "")[:120],
+                }
+                for c in processed_chunks_with_ref_ids
+            ],
+            "total_chunks_found": len(chunks),
+            "total_chunks_kept": len(processed_chunks_with_ref_ids),
+        }
+
     logger.info(f"Final context: {len(processed_chunks_with_ref_ids)} chunks")
 
     # Build raw data structure for naive mode using processed chunks with reference IDs
@@ -6163,6 +6249,14 @@ async def naive_query(
         text_chunks_str=text_units_str,
         reference_list_str=reference_list_str,
     )
+
+    if trace is not None:
+        try:
+            from lightrag.api.routers.trace_routes import save_trace
+
+            save_trace(global_config["working_dir"], trace)
+        except Exception:
+            logger.warning("failed to save retrieval trace", exc_info=True)
 
     if query_param.only_need_context and not query_param.only_need_prompt:
         return QueryResult(content=context_content, raw_data=raw_data)

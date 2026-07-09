@@ -55,6 +55,7 @@ from lightrag.api.routers.document_routes import (
     DocumentManager,
     create_document_routes,
 )
+from lightrag.api.routers.trace_routes import create_trace_routes
 from lightrag.parser.plugins import load_third_party_parsers
 from lightrag.parser.routing import (
     parser_rules_from_env,
@@ -2195,6 +2196,7 @@ def create_app(args):
     app.include_router(create_document_routes(rag, doc_manager, api_key))
     app.include_router(create_query_routes(rag, api_key, args.top_k))
     app.include_router(create_graph_routes(rag, api_key))
+    app.include_router(create_trace_routes(rag))
 
     # Add Ollama API routes
     ollama_api = OllamaAPI(rag, top_k=args.top_k, api_key=api_key)

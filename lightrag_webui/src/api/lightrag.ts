@@ -220,6 +220,8 @@ export type QueryRequest = {
   enable_rerank?: boolean
   /** If True, emits retrieval progress events and a final response-time metadata line (streaming only). Default: false. */
   include_progress?: boolean
+  /** If True, save a detailed retrieval trace (A/B/C-path rankings) to {working_dir}/traces/. Default False (zero overhead). */
+  enable_trace?: boolean
 }
 
 export type QueryResponse = {
@@ -1416,5 +1418,79 @@ export const getDocumentsPaginatedWithTimeout = (
  */
 export const getDocumentStatusCounts = async (): Promise<StatusCountsResponse> => {
   const response = await axiosInstance.get('/documents/status_counts')
+  return response.data
+}
+
+// ── Retrieval trace types ─────────────────────────────────────────────────
+
+export type TraceListItem = {
+  trace_id: string
+  timestamp: string
+  query_preview: string
+  mode: string
+  has_sparse: boolean
+  file_size: number
+}
+
+export type TraceListResponse = {
+  traces: TraceListItem[]
+  traces_dir: string
+}
+
+export type TraceRankingEntry = {
+  rank: number
+  chunk_id: string
+  file_path: string
+  distance: number
+  content_preview?: string
+}
+
+export type TraceFusedEntry = {
+  rank: number
+  chunk_id: string
+  file_path: string
+  dense_rank: number | null
+  sparse_rank: number | null
+  distance: number
+  content_preview?: string
+}
+
+export type TraceDetail = {
+  trace_id: string
+  timestamp: string
+  query: string
+  mode: string
+  weights?: { dense: number; sparse: number }
+  keywords?: { high_level: string[]; low_level: string[] }
+  entities?: Record<string, any>[]
+  relations?: Record<string, any>[]
+  path_a_dense_ranking?: TraceRankingEntry[]
+  path_b_sparse_ranking?: TraceRankingEntry[]
+  path_ab_fused_ranking?: TraceFusedEntry[]
+  path_c_kg_chunks?: Record<string, any>[]
+  final_context?: {
+    vector_chunks?: { chunk_id: string; file_path: string; content_preview: string }[]
+    total_chunks_found?: number
+    total_chunks_kept?: number
+  }
+}
+
+export const listTraces = async (): Promise<TraceListResponse> => {
+  const response = await axiosInstance.get('/traces')
+  return response.data
+}
+
+export const getTrace = async (traceId: string): Promise<TraceDetail> => {
+  const response = await axiosInstance.get(`/traces/${encodeURIComponent(traceId)}`)
+  return response.data
+}
+
+export const deleteTrace = async (traceId: string): Promise<{ status: string; trace_id: string }> => {
+  const response = await axiosInstance.delete(`/traces/${encodeURIComponent(traceId)}`)
+  return response.data
+}
+
+export const clearTraces = async (): Promise<{ status: string; deleted_count: number }> => {
+  const response = await axiosInstance.delete('/traces')
   return response.data
 }

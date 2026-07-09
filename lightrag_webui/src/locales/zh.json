@@ -11,6 +11,7 @@
     "knowledgeGraph": "知识图谱",
     "retrieval": "检索",
     "api": "API",
+    "traces": "检索追踪",
     "projectRepository": "项目仓库",
     "logout": "退出登录",
     "frontendNeedsRebuild": "前端代码需重新构建",
@@ -517,6 +518,8 @@
       "onlyNeedPromptTooltip": "如果为True，仅返回生成的提示而不产生响应",
       "streamResponse": "流式响应",
       "streamResponseTooltip": "如果为True，启用实时流式输出响应",
+      "enableTrace": "检索追踪",
+      "enableTraceTooltip": "保存详细的检索追踪(A/B/C路排名)为JSON文件, 可在追踪面板查看。每次查询增加1-2次额外向量搜索。",
       "userPrompt": "附加输出提示词",
       "userPromptTooltip": "向LLM提供额外的响应要求（与查询内容无关，仅用于处理输出）。",
       "userPromptPlaceholder": "输入自定义提示词（可选）",
@@ -541,5 +544,33 @@
     "prevPage": "上一页",
     "nextPage": "下一页",
     "lastPage": "末页"
+  },
+  "traces": {
+    "title": "检索追踪",
+    "refresh": "刷新",
+    "clearAll": "清空全部",
+    "clearAllConfirm": "确认删除全部追踪记录？",
+    "clearAllDone": "全部追踪记录已删除",
+    "delete": "删除本条",
+    "close": "关闭",
+    "empty": "暂无追踪记录。在查询设置中启用 Trace 即可记录。",
+    "selectHint": "从左侧选择一条追踪记录查看详情。",
+    "noData": "无数据",
+    "keywords": "关键词",
+    "highLevel": "高层",
+    "lowLevel": "底层",
+    "dense": "A: 稠密",
+    "sparse": "B: 稀疏",
+    "fused": "A+B 融合",
+    "vectorRankings": "向量检索排名 (A · B · A+B)",
+    "kgRankings": "KG Chunks (C)",
+    "finalContext": "最终上下文",
+    "chunksSent": "chunks 送入 LLM",
+    "errors": {
+      "fetchListFailed": "加载追踪列表失败: {{error}}",
+      "fetchDetailFailed": "加载追踪详情失败: {{error}}",
+      "deleteFailed": "删除失败: {{error}}",
+      "clearAllFailed": "清空失败: {{error}}"
+    }
   }
 }

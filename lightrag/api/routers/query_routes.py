@@ -112,6 +112,11 @@ class QueryRequest(BaseModel):
         description="Enable reranking for retrieved text chunks. If True but no rerank model is configured, a warning will be issued. Default is True.",
     )
 
+    enable_trace: Optional[bool] = Field(
+        default=None,
+        description="If True, save a detailed retrieval trace (A/B/C-path rankings) as a JSON file in {working_dir}/traces/. Adds 1–2 extra vector searches per query. Default False (zero overhead).",
+    )
+
     include_references: Optional[bool] = Field(
         default=True,
         description="If True, includes reference list in responses. Affects /query and /query/stream endpoints. /query/data always includes references.",
