@@ -419,6 +419,7 @@ def parse_args() -> argparse.Namespace:
             "openai",
             "azure_openai",
             "bedrock",
+            "dashscope",
             "jina",
             "gemini",
             "voyageai",

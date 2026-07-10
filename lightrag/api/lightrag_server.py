@@ -673,12 +673,17 @@ def create_optimized_embedding_function(
     provider_max_token_size = None
     provider_embedding_dim = None
     provider_supports_asymmetric = False
+    provider_supports_sparse = False
 
     try:
         if binding == "openai":
             from lightrag.llm.openai import openai_embed
 
             provider_func = openai_embed
+        elif binding == "dashscope":
+            from lightrag.llm.dashscope import dashscope_embed
+
+            provider_func = dashscope_embed
         elif binding == "ollama":
             from lightrag.llm.ollama import ollama_embed
 
@@ -712,11 +717,13 @@ def create_optimized_embedding_function(
             provider_max_token_size = provider_func.max_token_size
             provider_embedding_dim = provider_func.embedding_dim
             provider_supports_asymmetric = provider_func.supports_asymmetric
+            provider_supports_sparse = provider_func.supports_sparse
             logger.debug(
                 f"Extracted from {binding} provider: "
                 f"max_token_size={provider_max_token_size}, "
                 f"embedding_dim={provider_embedding_dim}, "
-                f"supports_asymmetric={provider_supports_asymmetric}"
+                f"supports_asymmetric={provider_supports_asymmetric}, "
+                f"supports_sparse={provider_supports_sparse}"
             )
     except ImportError as e:
         logger.warning(f"Could not import provider function for {binding}: {e}")
@@ -909,6 +916,24 @@ def create_optimized_embedding_function(
                 if provider_supports_asymmetric and asymmetric_opt_in:
                     kwargs["context"] = context
                 return await actual_func(**kwargs)
+            elif binding == "dashscope":
+                from lightrag.llm.dashscope import dashscope_embed
+
+                actual_func = (
+                    dashscope_embed.func
+                    if isinstance(dashscope_embed, EmbeddingFunc)
+                    else dashscope_embed
+                )
+                kwargs = {
+                    "texts": texts,
+                    "api_key": api_key,
+                    "embedding_dim": embedding_dim,
+                }
+                if model:
+                    kwargs["model"] = model
+                if provider_supports_asymmetric and asymmetric_opt_in:
+                    kwargs["context"] = context
+                return await actual_func(**kwargs)
             else:  # openai and compatible
                 from lightrag.llm.openai import openai_embed
 
@@ -944,6 +969,7 @@ def create_optimized_embedding_function(
         send_dimensions=False,  # Will be set later based on binding requirements
         model_name=model,
         supports_asymmetric=provider_supports_asymmetric and asymmetric_opt_in,
+        supports_sparse=provider_supports_sparse,
     )
 
     # Log final embedding configuration. Only include prefix info when

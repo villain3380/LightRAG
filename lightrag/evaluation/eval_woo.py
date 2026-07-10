@@ -113,6 +113,52 @@ def _is_nan(value: Any) -> bool:
     return isinstance(value, float) and math.isnan(value)
 
 
+class _DashScopeEmbeddings:
+    """Wrap dashscope_embed for LangChain Embeddings / RAGAS compatibility.
+
+    RAGAS ``evaluate(embeddings=...)`` requires sync ``embed_documents`` /
+    ``embed_query`` methods.  ``dashscope_embed`` is async; RAGAS calls the
+    sync methods from inside a running event loop, so we bridge via a
+    dedicated thread (new event loop) which is safe from any calling context.
+    """
+
+    def __init__(self, api_key: str | None = None, model: str | None = None):
+        self._api_key = api_key
+        self._model = model
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._run(texts, context="document")
+
+    def embed_query(self, text: str) -> list[list[float]]:
+        return self._run([text], context="query")[0]
+
+    def _run(self, texts: list[str], context: str) -> list[list[float]]:
+        import threading
+        from lightrag.llm.dashscope import dashscope_embed
+
+        async def _embed():
+            result = await dashscope_embed.func(
+                texts,
+                api_key=self._api_key,
+                context=context,
+                model=self._model,
+            )
+            return [list(map(float, vec)) for vec in result]
+
+        result_container: dict = {}
+
+        def _thread_target():
+            result_container["data"] = asyncio.run(_embed())
+
+        thread = threading.Thread(target=_thread_target, daemon=True)
+        thread.start()
+        thread.join()
+
+        if "data" not in result_container:
+            raise RuntimeError("DashScope embedding thread failed")
+        return result_container["data"]
+
+
 class RAGEvaluator:
     """Evaluate RAG system quality using RAGAS metrics"""
 
@@ -172,28 +218,38 @@ class RAGEvaluator:
         eval_embedding_base_url = os.getenv("EVAL_EMBEDDING_BINDING_HOST") or os.getenv(
             "EVAL_LLM_BINDING_HOST"
         )
+        # Optional: use dashscope native API (dense+sparse) instead of OpenAI-compatible
+        eval_embedding_binding = os.getenv("EVAL_EMBEDDING_BINDING", "")
 
-        # Create LLM and Embeddings instances for RAGAS
+        # Create LLM instance for RAGAS
         llm_kwargs = {
             "model": eval_model,
             "api_key": eval_llm_api_key,
             "max_retries": int(os.getenv("EVAL_LLM_MAX_RETRIES", "5")),
             "request_timeout": int(os.getenv("EVAL_LLM_TIMEOUT", "180")),
         }
-        embedding_kwargs = {
-            "model": eval_embedding_model,
-            "api_key": eval_embedding_api_key,
-        }
-
         if eval_llm_base_url:
             llm_kwargs["base_url"] = eval_llm_base_url
 
-        if eval_embedding_base_url:
-            embedding_kwargs["base_url"] = eval_embedding_base_url
-
         # Create base LangChain LLM
         base_llm = ChatOpenAI(**llm_kwargs)
-        self.eval_embeddings = OpenAIEmbeddings(check_embedding_ctx_length=False, **embedding_kwargs)
+
+        # Create embedding instance for RAGAS
+        if eval_embedding_binding == "dashscope":
+            self.eval_embeddings = _DashScopeEmbeddings(
+                api_key=eval_embedding_api_key,
+                model=eval_embedding_model,
+            )
+        else:
+            embedding_kwargs = {
+                "model": eval_embedding_model,
+                "api_key": eval_embedding_api_key,
+            }
+            if eval_embedding_base_url:
+                embedding_kwargs["base_url"] = eval_embedding_base_url
+            self.eval_embeddings = OpenAIEmbeddings(
+                check_embedding_ctx_length=False, **embedding_kwargs
+            )
 
         # Wrap LLM with LangchainLLMWrapper and enable bypass_n mode for custom endpoints
         # This ensures compatibility with endpoints that don't support the 'n' parameter
