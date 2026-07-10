@@ -5390,6 +5390,9 @@ def convert_to_user_format(
             "file_path": chunk.get("file_path", "unknown_source"),
             "chunk_id": chunk.get("chunk_id", ""),
         }
+        # Carry per-chunk retrieval-source tracking (for trace hit_by)
+        if chunk.get("_tracking"):
+            chunk_data["_tracking"] = chunk["_tracking"]
         formatted_chunks.append(chunk_data)
 
     logger.debug(

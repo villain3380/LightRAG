@@ -41,15 +41,21 @@ class TraceDetailResponse(BaseModel):
     timestamp: str
     query: str
     mode: str
+    # v1 fields (kept for backward compat)
     weights: dict[str, float] | None = None
     keywords: dict[str, list[str]] | None = None
-    entities: list[dict[str, Any]] | None = None
-    relations: list[dict[str, Any]] | None = None
     path_a_dense_ranking: list[dict[str, Any]] | None = None
     path_b_sparse_ranking: list[dict[str, Any]] | None = None
     path_ab_fused_ranking: list[dict[str, Any]] | None = None
     path_c_kg_chunks: list[dict[str, Any]] | None = None
+    # v2 fields
+    query_params: dict[str, Any] | None = None
+    query_rewrite: dict[str, Any] | None = None
+    paths: dict[str, Any] | None = None
+    entities: list[dict[str, Any]] | None = None
+    relations: list[dict[str, Any]] | None = None
     final_context: dict[str, Any] | None = None
+    final_prompt: dict[str, Any] | None = None
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────

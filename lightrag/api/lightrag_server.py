@@ -751,7 +751,7 @@ def create_optimized_embedding_function(
     # Step 3: Create optimized embedding function (calls underlying function directly)
     # Note: When model is None, each binding will use its own default model
     async def optimized_embedding_function(
-        texts, embedding_dim=None, context="document"
+        texts, embedding_dim=None, context="document", with_sparse=False
     ):
         try:
             if binding == "lollms":
@@ -933,6 +933,8 @@ def create_optimized_embedding_function(
                     kwargs["model"] = model
                 if provider_supports_asymmetric and asymmetric_opt_in:
                     kwargs["context"] = context
+                if with_sparse:
+                    kwargs["with_sparse"] = True
                 return await actual_func(**kwargs)
             else:  # openai and compatible
                 from lightrag.llm.openai import openai_embed
@@ -1273,6 +1275,7 @@ def create_app(args):
         "openai",
         "azure_openai",
         "bedrock",
+        "dashscope",
         "jina",
         "gemini",
         "voyageai",

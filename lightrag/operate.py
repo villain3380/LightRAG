@@ -4108,18 +4108,48 @@ async def kg_query(
 
         ts = datetime.now(timezone.utc)
         qhash = md5(query.encode()).hexdigest()[:8]
+
+        # Gather full retrieval parameters for reproducibility
+        kg_chunk_pick_method = global_config.get(
+            "kg_chunk_pick_method", "VECTOR"
+        )
+        addon_params = global_config.get("addon_params", {})
+        chunk_retrieval_mode = addon_params.get("chunk_retrieval_mode", "dense")
+
         trace = {
             "trace_id": f"trace_{ts.strftime('%Y%m%d_%H%M%S')}_{qhash}",
             "timestamp": ts.isoformat(),
             "query": query,
             "mode": query_param.mode,
-            "weights": {
-                "dense": query_param.dense_weight,
-                "sparse": query_param.sparse_weight,
+            "query_params": {
+                "mode": query_param.mode,
+                "top_k": query_param.top_k,
+                "chunk_top_k": query_param.chunk_top_k,
+                "dense_weight": query_param.dense_weight,
+                "sparse_weight": query_param.sparse_weight,
+                "cosine_threshold": getattr(
+                    chunks_vdb, "cosine_better_than_threshold", None
+                ),
+                "max_entity_tokens": getattr(
+                    query_param, "max_entity_tokens", None
+                ),
+                "max_relation_tokens": getattr(
+                    query_param, "max_relation_tokens", None
+                ),
+                "max_total_tokens": getattr(
+                    query_param, "max_total_tokens", None
+                ),
+                "kg_chunk_pick_method": kg_chunk_pick_method,
+                "chunk_retrieval_mode": chunk_retrieval_mode,
             },
-            "keywords": {
-                "high_level": hl_keywords,
-                "low_level": ll_keywords,
+            "query_rewrite": {
+                "high_level_keywords": hl_keywords,
+                "low_level_keywords": ll_keywords,
+            },
+            "paths": {
+                "dense_ranking": None,
+                "sparse_ranking": None,
+                "fused_ranking": None,
             },
             "entities": None,
             "relations": None,
@@ -4137,6 +4167,7 @@ async def kg_query(
         query_param,
         chunks_vdb,
         progress_callback=progress_callback,
+        trace=trace,
     )
 
     if context_result is None:
@@ -4150,22 +4181,51 @@ async def kg_query(
                 logger.warning("failed to save retrieval trace", exc_info=True)
         return None
 
-    # Populate trace with KG entities / relations from raw_data
+    # Populate trace with KG entities / relations + per-chunk hit_by
     if trace is not None:
         try:
             data = context_result.raw_data.get("data", {})
             trace["entities"] = data.get("entities", []) or None
             trace["relations"] = data.get("relationships", []) or None
+
+            # Build hit_by for each chunk using _tracking carried from _merge_all_chunks
+            dense_ranking = trace.get("paths", {}).get("dense_ranking") or []
+            sparse_ranking = trace.get("paths", {}).get("sparse_ranking") or []
+            dense_rmap = {r["chunk_id"]: r["rank"] for r in dense_ranking}
+            sparse_rmap = {r["chunk_id"]: r["rank"] for r in sparse_ranking}
+
             chunks = data.get("chunks", []) or []
-            trace["final_context"] = {
-                "vector_chunks": [
-                    {
-                        "chunk_id": c.get("chunk_id"),
-                        "file_path": c.get("file_path"),
-                        "content_preview": (c.get("content") or "")[:120],
+            trace_chunks = []
+            for c in chunks:
+                cid = c.get("chunk_id", "")
+                # Direct _tracking from the chunk (set by _merge_all_chunks)
+                tracking = c.get("_tracking") or {}
+                sources = tracking.get("sources", {})
+                orders = tracking.get("orders", {})
+
+                hit_by: dict[str, Any] = {}
+                if sources.get("dense"):
+                    hit_by["dense"] = {
+                        "rank": dense_rmap.get(cid) or orders.get("dense")
                     }
-                    for c in chunks
-                ],
+                if sources.get("sparse"):
+                    hit_by["sparse"] = {
+                        "rank": sparse_rmap.get(cid) or orders.get("sparse")
+                    }
+                if sources.get("entity"):
+                    hit_by["entity"] = True
+                if sources.get("relation"):
+                    hit_by["relation"] = True
+
+                trace_chunks.append({
+                    "chunk_id": cid,
+                    "file_path": c.get("file_path", ""),
+                    "content": c.get("content", ""),  # full content, not preview
+                    "hit_by": hit_by if hit_by else None,
+                })
+
+            trace["final_context"] = {
+                "chunks": trace_chunks,
                 "total_chunks": len(chunks),
             }
         except Exception:
@@ -4200,6 +4260,21 @@ async def kg_query(
     )
 
     user_query = query
+
+    # Record final prompt info in trace (truncate system prompt to avoid bloat)
+    if trace is not None:
+        tokenizer: Tokenizer = global_config.get("tokenizer")
+        ctx_tokens = (
+            len(tokenizer.encode(context_result.context))
+            if tokenizer
+            else 0
+        )
+        trace["final_prompt"] = {
+            "system_prompt_head": sys_prompt[:2000],
+            "user_query": user_query,
+            "context_length_chars": len(context_result.context),
+            "context_length_tokens": ctx_tokens,
+        }
 
     if query_param.only_need_prompt:
         if trace is not None:
@@ -4572,6 +4647,7 @@ async def _get_vector_context(
     query_param: QueryParam,
     query_embedding: list[float] = None,
     trace: dict | None = None,
+    chunk_tracking: dict | None = None,
 ) -> list[dict]:
     """
     Retrieve text chunks from the vector database without reranking or truncation.
@@ -4606,7 +4682,42 @@ async def _get_vector_context(
                 query, top_k=search_top_k, query_embedding=query_embedding
             )
 
-        # ── trace: collect A/B-path rankings ──
+        # ── trace: record dense ranking (always, zero extra cost) ──
+        if trace is not None:
+            # Reuse the already-fetched results for dense ranking
+            def _rank_results(raw: list, max_k: int) -> list[dict]:
+                out: list[dict] = []
+                for i, r in enumerate(raw):
+                    cid = r.get("id") or r.get("chunk_id", "")
+                    if not cid:
+                        continue
+                    out.append({
+                        "rank": i + 1,
+                        "chunk_id": cid,
+                        "file_path": r.get("file_path", ""),
+                        "distance": r.get("distance"),
+                        "content_preview": (r.get("content") or "")[:120],
+                    })
+                return out[:max_k]
+
+            trace.setdefault("paths", {})["dense_ranking"] = _rank_results(
+                results, search_top_k
+            )
+
+            # Write dense hits to chunk_tracking (even when sparse is off)
+            if chunk_tracking is not None:
+                for i, r in enumerate(results):
+                    cid = r.get("id") or r.get("chunk_id", "")
+                    if cid:
+                        if cid not in chunk_tracking:
+                            chunk_tracking[cid] = {
+                                "sources": {}, "frequencies": {}, "orders": {}
+                            }
+                        chunk_tracking[cid]["sources"]["dense"] = True
+                        chunk_tracking[cid]["frequencies"]["dense"] = 1
+                        chunk_tracking[cid]["orders"]["dense"] = i + 1
+
+        # ── trace: sparse-enabled extra paths (A/B separate, fused) ──
         if trace is not None and sparse_enabled:
             # Pre-compute dense+sparse vectors once; reuse for all three searches.
             emb_res = await chunks_vdb.embedding_func.aembed(
@@ -4637,8 +4748,12 @@ async def _get_vector_context(
                     })
                 return out[:max_k]
 
-            trace["path_a_dense_ranking"] = _rank_path(dense_raw, search_top_k)
-            trace["path_b_sparse_ranking"] = _rank_path(sparse_raw, search_top_k)
+            trace.setdefault("paths", {})["dense_ranking"] = _rank_path(
+                dense_raw, search_top_k
+            )
+            trace.setdefault("paths", {})["sparse_ranking"] = _rank_path(
+                sparse_raw, search_top_k
+            )
 
             # Cross-reference: for each fused result, find its A/B-path ranks.
             dense_rmap = {r["id"]: i + 1 for i, r in enumerate(dense_raw) if r.get("id")}
@@ -4655,7 +4770,21 @@ async def _get_vector_context(
                     "distance": r.get("distance"),
                     "content_preview": (r.get("content") or "")[:120],
                 })
-            trace["path_ab_fused_ranking"] = fused
+            trace.setdefault("paths", {})["fused_ranking"] = fused
+
+            # Write sparse-path hits to chunk_tracking (dense path is handled
+            # by the caller via the vector_chunks loop in _perform_kg_search).
+            if chunk_tracking is not None:
+                for i, r in enumerate(sparse_raw):
+                    cid = r.get("id") or r.get("chunk_id", "")
+                    if cid:
+                        if cid not in chunk_tracking:
+                            chunk_tracking[cid] = {
+                                "sources": {}, "frequencies": {}, "orders": {}
+                            }
+                        chunk_tracking[cid]["sources"]["sparse"] = True
+                        chunk_tracking[cid]["frequencies"]["sparse"] = 1
+                        chunk_tracking[cid]["orders"]["sparse"] = i + 1
 
         if not results:
             logger.info(
@@ -4696,6 +4825,7 @@ async def _perform_kg_search(
     query_param: QueryParam,
     chunks_vdb: BaseVectorStorage = None,
     progress_callback: ProgressCallback | None = None,
+    trace: dict | None = None,
 ) -> dict[str, Any]:
     """
     Pure search logic that retrieves raw entities, relations, and vector chunks.
@@ -4824,16 +4954,20 @@ async def _perform_kg_search(
                 chunks_vdb,
                 query_param,
                 query_embedding,
+                trace=trace,
+                chunk_tracking=chunk_tracking,
             )
-            # Track vector chunks with source metadata
+            # Track vector chunks with source metadata (accumulate, don't overwrite)
             for i, chunk in enumerate(vector_chunks):
                 chunk_id = chunk.get("chunk_id") or chunk.get("id")
                 if chunk_id:
-                    chunk_tracking[chunk_id] = {
-                        "source": "C",
-                        "frequency": 1,  # Vector chunks always have frequency 1
-                        "order": i + 1,  # 1-based order in vector search results
-                    }
+                    if chunk_id not in chunk_tracking:
+                        chunk_tracking[chunk_id] = {
+                            "sources": {}, "frequencies": {}, "orders": {}
+                        }
+                    chunk_tracking[chunk_id]["sources"]["dense"] = True
+                    chunk_tracking[chunk_id]["frequencies"]["dense"] = 1
+                    chunk_tracking[chunk_id]["orders"]["dense"] = i + 1
                 else:
                     logger.warning(f"Vector chunk missing chunk_id: {chunk}")
 
@@ -5158,7 +5292,9 @@ async def _merge_all_chunks(
             query_embedding=query_embedding,
         )
 
-    # Round-robin merge chunks from different sources with deduplication
+    # Round-robin merge chunks from different sources with deduplication.
+    # Each merged chunk carries an internal _tracking field (from chunk_tracking)
+    # so the trace builder can later populate per-chunk hit_by annotations.
     merged_chunks = []
     seen_chunk_ids = set()
     max_len = max(len(vector_chunks), len(entity_chunks), len(relation_chunks))
@@ -5176,6 +5312,7 @@ async def _merge_all_chunks(
                         "content": chunk["content"],
                         "file_path": chunk.get("file_path", "unknown_source"),
                         "chunk_id": chunk_id,
+                        "_tracking": chunk_tracking.get(chunk_id),
                     }
                 )
 
@@ -5190,6 +5327,7 @@ async def _merge_all_chunks(
                         "content": chunk["content"],
                         "file_path": chunk.get("file_path", "unknown_source"),
                         "chunk_id": chunk_id,
+                        "_tracking": chunk_tracking.get(chunk_id),
                     }
                 )
 
@@ -5204,6 +5342,7 @@ async def _merge_all_chunks(
                         "content": chunk["content"],
                         "file_path": chunk.get("file_path", "unknown_source"),
                         "chunk_id": chunk_id,
+                        "_tracking": chunk_tracking.get(chunk_id),
                     }
                 )
 
@@ -5361,23 +5500,27 @@ async def _build_context_str(
         empty_raw_data["message"] = "Query returned empty dataset."
         return "", empty_raw_data
 
-    # output chunks tracking infomations
-    # format: <source><frequency>/<order> (e.g., E5/2 R2/1 C1/1)
+    # output chunks tracking information
+    # format: <source><frequency>/<order> per source (e.g., D1/3 E5/2 R2/1)
     if truncated_chunks and chunk_tracking:
         chunk_tracking_log = []
         for chunk in truncated_chunks:
             chunk_id = chunk.get("chunk_id")
             if chunk_id and chunk_id in chunk_tracking:
-                tracking_info = chunk_tracking[chunk_id]
-                source = tracking_info["source"]
-                frequency = tracking_info["frequency"]
-                order = tracking_info["order"]
-                chunk_tracking_log.append(f"{source}{frequency}/{order}")
+                ti = chunk_tracking[chunk_id]
+                parts = []
+                for src in ("dense", "sparse", "entity", "relation"):
+                    if src in ti.get("sources", {}):
+                        f = ti.get("frequencies", {}).get(src, 0)
+                        o = ti.get("orders", {}).get(src, 0)
+                        tag = src[0].upper()  # D, S, E, R
+                        parts.append(f"{tag}{f}/{o}")
+                chunk_tracking_log.append(" ".join(parts) if parts else "?0/0")
             else:
                 chunk_tracking_log.append("?0/0")
 
         if chunk_tracking_log:
-            logger.info(f"Final chunks S+F/O: {' '.join(chunk_tracking_log)}")
+            logger.info(f"Final chunks sources: {' '.join(chunk_tracking_log)}")
 
     result = kg_context_template.format(
         entities_str=entities_str,
@@ -5418,6 +5561,7 @@ async def _build_query_context(
     query_param: QueryParam,
     chunks_vdb: BaseVectorStorage = None,
     progress_callback: ProgressCallback | None = None,
+    trace: dict | None = None,
 ) -> QueryContextResult | None:
     """
     Main query context building function using the new 4-stage architecture:
@@ -5442,6 +5586,7 @@ async def _build_query_context(
         query_param,
         chunks_vdb,
         progress_callback=progress_callback,
+        trace=trace,
     )
 
     if not search_result["final_entities"] and not search_result["final_relations"]:
@@ -5519,6 +5664,9 @@ async def _build_query_context(
         "merged_chunks_count": len(merged_chunks),
         "final_chunks_count": len(raw_data.get("data", {}).get("chunks", [])),
     }
+    # Pass chunk_tracking through raw_data so the trace builder can use it
+    # for per-chunk hit_by annotations.
+    raw_data["metadata"]["chunk_tracking"] = search_result.get("chunk_tracking", {})
 
     logger.debug(
         f"[_build_query_context] Context length: {len(context) if context else 0}"
@@ -5794,13 +5942,17 @@ async def _find_related_text_unit_from_entities(
             chunk_data_copy["chunk_id"] = chunk_id  # Add chunk_id for deduplication
             result_chunks.append(chunk_data_copy)
 
-            # Update chunk tracking if provided
+            # Update chunk tracking (accumulate, don't overwrite)
             if chunk_tracking is not None:
-                chunk_tracking[chunk_id] = {
-                    "source": "E",
-                    "frequency": chunk_occurrence_count.get(chunk_id, 1),
-                    "order": i + 1,  # 1-based order in final entity-related results
-                }
+                if chunk_id not in chunk_tracking:
+                    chunk_tracking[chunk_id] = {
+                        "sources": {}, "frequencies": {}, "orders": {}
+                    }
+                chunk_tracking[chunk_id]["sources"]["entity"] = True
+                chunk_tracking[chunk_id]["frequencies"]["entity"] = (
+                    chunk_occurrence_count.get(chunk_id, 1)
+                )
+                chunk_tracking[chunk_id]["orders"]["entity"] = i + 1
 
     return result_chunks
 
@@ -5972,6 +6124,18 @@ async def _find_related_text_unit_from_relations(
     for relation_info in relations_with_chunks:
         deduplicated_chunks = []
         for chunk_id in relation_info["chunks"]:
+            # Record relation source BEFORE dedup check — a chunk hit by
+            # both entity and relation paths must show both in trace hit_by.
+            if chunk_tracking is not None and chunk_id:
+                if chunk_id not in chunk_tracking:
+                    chunk_tracking[chunk_id] = {
+                        "sources": {}, "frequencies": {}, "orders": {}
+                    }
+                chunk_tracking[chunk_id]["sources"]["relation"] = True
+                chunk_tracking[chunk_id]["frequencies"]["relation"] = (
+                    chunk_tracking[chunk_id].get("frequencies", {}).get("relation", 0) + 1
+                )
+
             # Skip chunks that already exist in entity_chunks
             if chunk_id in entity_chunk_ids:
                 # Only count each unique chunk_id once
@@ -6089,13 +6253,17 @@ async def _find_related_text_unit_from_relations(
             chunk_data_copy["chunk_id"] = chunk_id  # Add chunk_id for deduplication
             result_chunks.append(chunk_data_copy)
 
-            # Update chunk tracking if provided
+            # Update chunk tracking (accumulate, don't overwrite)
             if chunk_tracking is not None:
-                chunk_tracking[chunk_id] = {
-                    "source": "R",
-                    "frequency": chunk_occurrence_count.get(chunk_id, 1),
-                    "order": i + 1,  # 1-based order in final relation-related results
-                }
+                if chunk_id not in chunk_tracking:
+                    chunk_tracking[chunk_id] = {
+                        "sources": {}, "frequencies": {}, "orders": {}
+                    }
+                chunk_tracking[chunk_id]["sources"]["relation"] = True
+                chunk_tracking[chunk_id]["frequencies"]["relation"] = (
+                    chunk_occurrence_count.get(chunk_id, 1)
+                )
+                chunk_tracking[chunk_id]["orders"]["relation"] = i + 1
 
     return result_chunks
 
@@ -6175,6 +6343,7 @@ async def naive_query(
         await progress_callback(QueryProgress.RETRIEVING_CHUNKS)
     # ── retrieval trace ──
     trace: dict | None = None
+    chunk_tracking: dict = {}
     if query_param.enable_trace:
         from hashlib import md5
         from datetime import datetime, timezone
@@ -6186,16 +6355,36 @@ async def naive_query(
             "timestamp": ts.isoformat(),
             "query": query,
             "mode": "naive",
-            "weights": {
-                "dense": query_param.dense_weight,
-                "sparse": query_param.sparse_weight,
+            "query_params": {
+                "mode": "naive",
+                "top_k": query_param.top_k,
+                "chunk_top_k": query_param.chunk_top_k,
+                "dense_weight": query_param.dense_weight,
+                "sparse_weight": query_param.sparse_weight,
+                "cosine_threshold": getattr(
+                    chunks_vdb, "cosine_better_than_threshold", None
+                ),
+                "max_total_tokens": getattr(
+                    query_param, "max_total_tokens", None
+                ),
+                "chunk_retrieval_mode": global_config.get(
+                    "addon_params", {}
+                ).get("chunk_retrieval_mode", "dense"),
             },
-            "keywords": None,
+            "query_rewrite": None,
+            "paths": {
+                "dense_ranking": None,
+                "sparse_ranking": None,
+                "fused_ranking": None,
+            },
             "entities": None,
             "relations": None,
         }
 
-    chunks = await _get_vector_context(query, chunks_vdb, query_param, None, trace=trace)
+    chunks = await _get_vector_context(
+        query, chunks_vdb, query_param, None,
+        trace=trace, chunk_tracking=chunk_tracking,
+    )
 
     if chunks is None or len(chunks) == 0:
         logger.info(
@@ -6263,15 +6452,38 @@ async def naive_query(
     )
 
     if trace is not None:
-        trace["final_context"] = {
-            "vector_chunks": [
-                {
-                    "chunk_id": c.get("chunk_id") or c.get("id", ""),
-                    "file_path": c.get("file_path", ""),
-                    "content_preview": (c.get("content") or "")[:120],
+        # Build hit_by for each chunk from chunk_tracking + path rankings
+        dense_ranking = trace.get("paths", {}).get("dense_ranking") or []
+        sparse_ranking = trace.get("paths", {}).get("sparse_ranking") or []
+        dense_rmap = {r["chunk_id"]: r["rank"] for r in dense_ranking}
+        sparse_rmap = {r["chunk_id"]: r["rank"] for r in sparse_ranking}
+
+        trace_chunks = []
+        for c in processed_chunks_with_ref_ids:
+            cid = c.get("chunk_id") or c.get("id", "")
+            tracking = chunk_tracking.get(cid, {})
+            sources = tracking.get("sources", {})
+            orders = tracking.get("orders", {})
+
+            hit_by: dict[str, Any] = {}
+            if sources.get("dense"):
+                hit_by["dense"] = {
+                    "rank": dense_rmap.get(cid) or orders.get("dense")
                 }
-                for c in processed_chunks_with_ref_ids
-            ],
+            if sources.get("sparse"):
+                hit_by["sparse"] = {
+                    "rank": sparse_rmap.get(cid) or orders.get("sparse")
+                }
+
+            trace_chunks.append({
+                "chunk_id": cid,
+                "file_path": c.get("file_path", ""),
+                "content": c.get("content", ""),
+                "hit_by": hit_by if hit_by else None,
+            })
+
+        trace["final_context"] = {
+            "chunks": trace_chunks,
             "total_chunks_found": len(chunks),
             "total_chunks_kept": len(processed_chunks_with_ref_ids),
         }
