@@ -2642,6 +2642,14 @@ class MilvusVectorDBStorage(BaseVectorStorage):
                     f"{len(docs_to_embed)} vectors in {len(batches)} batch(es) "
                     f"(batch_num={self._max_batch_size})"
                 )
+                # Tag the embedding namespace so the resource tracker can
+                # attribute this call to chunks / entities / relationships.
+                from lightrag.resource_tracker import (
+                    set_embedding_namespace as _set_emb_ns,
+                    reset_embedding_namespace as _reset_emb_ns,
+                )
+
+                _ns_token = _set_emb_ns(self.namespace)
                 try:
                     if self.sparse_enabled:
                         results_list = await asyncio.gather(
@@ -2672,6 +2680,8 @@ class MilvusVectorDBStorage(BaseVectorStorage):
                         f"(upserts={len(docs_to_embed)}): {e}"
                     )
                     raise
+                finally:
+                    _reset_emb_ns(_ns_token)
 
                 if len(embeddings) != len(docs_to_embed):
                     raise RuntimeError(

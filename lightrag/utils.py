@@ -56,6 +56,7 @@ from lightrag.constants import (
     DEFAULT_COMPACT_BATCH_LIMIT,
     DEFAULT_QUEUE_STATS_MIN_PUBLISH_INTERVAL,
 )
+from lightrag.resource_tracker import get_active_tracker
 
 # Precompile regex pattern for JSON sanitization (module-level, compiled once)
 _SURROGATE_PATTERN = re.compile(r"[\uD800-\uDFFF\uFFFE\uFFFF]")
@@ -668,8 +669,21 @@ class EmbeddingFunc:
     async def __call__(self, *args, **kwargs) -> np.ndarray:
         self._prepare_kwargs(kwargs)
 
-        # Call the actual embedding function
-        result = await self.func(*args, **kwargs)
+        # Resource tracking: record the embedding call if an ingestion
+        # tracker is active (query path / no tracker => no overhead).
+        tracker = get_active_tracker()
+        texts = args[0] if args and isinstance(args[0], (list, tuple)) else None
+        if tracker is not None and texts:
+            _t0 = time.perf_counter()
+            result = await self.func(*args, **kwargs)
+            tracker.record_embedding_call(
+                texts=list(texts),
+                duration_ms=(time.perf_counter() - _t0) * 1000,
+                sparse=False,
+            )
+        else:
+            # Call the actual embedding function
+            result = await self.func(*args, **kwargs)
 
         # Sparse-capable funcs return ndarray on the dense path (with_sparse
         # defaults to False); guard anyway so a stray EmbeddingResult is unwrapped.
@@ -709,7 +723,18 @@ class EmbeddingFunc:
             if "with_sparse" in sig.parameters:
                 kwargs["with_sparse"] = True
 
-        result = await self.func(*args, **kwargs)
+        tracker = get_active_tracker()
+        texts = args[0] if args and isinstance(args[0], (list, tuple)) else None
+        if tracker is not None and texts:
+            _t0 = time.perf_counter()
+            result = await self.func(*args, **kwargs)
+            tracker.record_embedding_call(
+                texts=list(texts),
+                duration_ms=(time.perf_counter() - _t0) * 1000,
+                sparse=with_sparse,
+            )
+        else:
+            result = await self.func(*args, **kwargs)
 
         if with_sparse:
             if not isinstance(result, EmbeddingResult):
@@ -3759,6 +3784,64 @@ def remove_think_tags(text: str) -> str:
     return text.strip()
 
 
+async def _invoke_llm_with_tracking(
+    use_llm_func: callable,
+    prompt: str,
+    system_prompt: str | None,
+    kwargs: dict,
+    *,
+    cache_type: str,
+    chunk_id: str | None,
+    history_messages: list | None,
+) -> str:
+    """Call the LLM func, recording the call if an ingestion tracker is active.
+
+    Timing + token estimation run only when a tracker is in scope (i.e.
+    during ingestion); query-path calls with no tracker pay no overhead
+    beyond a single contextvar lookup.
+    """
+    tracker = get_active_tracker()
+    if tracker is None:
+        return await use_llm_func(prompt, system_prompt=system_prompt, **kwargs)
+    t0 = time.perf_counter()
+    res = await use_llm_func(prompt, system_prompt=system_prompt, **kwargs)
+    duration_ms = (time.perf_counter() - t0) * 1000
+    tracker.record_llm_call(
+        stage=cache_type,
+        source_id=chunk_id,
+        cache_hit=False,
+        user_prompt=prompt,
+        system_prompt=system_prompt,
+        history_messages=history_messages,
+        response=res,
+        duration_ms=duration_ms,
+    )
+    return res
+
+
+def _record_llm_cache_hit(
+    cache_type: str,
+    chunk_id: str | None,
+    user_prompt: str | None,
+    system_prompt: str | None,
+    history_messages: list | None,
+) -> None:
+    """Record a cache hit (no actual LLM call, 0 output tokens)."""
+    tracker = get_active_tracker()
+    if tracker is None:
+        return
+    tracker.record_llm_call(
+        stage=cache_type,
+        source_id=chunk_id,
+        cache_hit=True,
+        user_prompt=user_prompt,
+        system_prompt=system_prompt,
+        history_messages=history_messages,
+        response=None,
+        duration_ms=0.0,
+    )
+
+
 async def use_llm_func_with_cache(
     user_prompt: str,
     use_llm_func: callable,
@@ -3772,6 +3855,7 @@ async def use_llm_func_with_cache(
     response_format: Any | None = None,
     entity_extraction: bool = False,
     llm_cache_identity: Any | None = None,
+    source_label: str | None = None,
 ) -> tuple[str, int]:
     """Call LLM function with cache support and text sanitization
 
@@ -3874,6 +3958,15 @@ async def use_llm_func_with_cache(
             if cache_keys_collector is not None:
                 cache_keys_collector.append(cache_key)
 
+            # Record cache hit (input tokens still estimated for visibility,
+            # but output tokens = 0 since no model call happened).
+            _record_llm_cache_hit(
+                cache_type,
+                chunk_id or source_label,
+                safe_user_prompt,
+                safe_system_prompt,
+                safe_history_messages,
+            )
             return content, timestamp
         statistic_data["llm_call"] += 1
 
@@ -3886,8 +3979,14 @@ async def use_llm_func_with_cache(
         if response_format is not None:
             kwargs["response_format"] = response_format
 
-        res: str = await use_llm_func(
-            safe_user_prompt, system_prompt=safe_system_prompt, **kwargs
+        res: str = await _invoke_llm_with_tracking(
+            use_llm_func,
+            safe_user_prompt,
+            safe_system_prompt,
+            kwargs,
+            cache_type=cache_type,
+            chunk_id=chunk_id or source_label,
+            history_messages=safe_history_messages,
         )
 
         # Capture the token-limit truncation flag before remove_think_tags
@@ -3936,8 +4035,14 @@ async def use_llm_func_with_cache(
         kwargs["response_format"] = response_format
 
     try:
-        res = await use_llm_func(
-            safe_user_prompt, system_prompt=safe_system_prompt, **kwargs
+        res = await _invoke_llm_with_tracking(
+            use_llm_func,
+            safe_user_prompt,
+            safe_system_prompt,
+            kwargs,
+            cache_type=cache_type,
+            chunk_id=chunk_id or source_label,
+            history_messages=safe_history_messages,
         )
     except Exception as e:
         # Add [LLM func] prefix to error message

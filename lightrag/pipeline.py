@@ -53,6 +53,11 @@ from lightrag.kg.shared_storage import (
 )
 from lightrag.kg.pipeline_ingress import PipelineIngressMessage
 from lightrag.operate import merge_nodes_and_edges
+from lightrag.resource_tracker import (
+    IngestionResourceTracker,
+    activate_tracker,
+    deactivate_tracker,
+)
 from lightrag.parser.base import ParseContext
 from lightrag.parser.llm_bridge import LLMBridgePipelineCancelled
 from lightrag.parser.registry import (
@@ -3088,12 +3093,64 @@ class _PipelineMixin:
         parsed_data: dict[str, Any],
         ctx: _BatchRunContext,
     ) -> None:
-        """Single-document state machine: chunking → KG extraction → merge.
+        """Single-document ingestion wrapper with resource tracking.
 
-        Always invoked from ``_process_worker`` with ``parsed_data`` already
-        populated by ``_parse_worker`` + ``_analyze_worker``.  Drives the
-        PROCESSING → PROCESSED state machine, with FAILED fallbacks at both
-        the extract and merge stage boundaries.
+        Activates an :class:`IngestionResourceTracker` for the whole
+        document body so every LLM/embedding call is recorded, then delegates
+        to :meth:`_process_single_document_core`. The report is persisted in
+        a ``finally`` so a FAILED doc still keeps its record - the user
+        already paid the LLM/embedding cost.
+        """
+        _file_path = resolve_doc_file_path(status_doc=status_doc)
+        _embedding_model_name = ""
+        if self.embedding_func is not None:
+            _embedding_model_name = (
+                getattr(self.embedding_func, "model_name", None) or ""
+            )
+        _resource_tracker = IngestionResourceTracker(
+            doc_id=doc_id,
+            tokenizer=self.tokenizer,
+            llm_model=getattr(self, "llm_model_name", "") or "",
+            embedding_model=_embedding_model_name,
+        )
+        _resource_tracker.file_path = _file_path
+        _tracker_token = activate_tracker(_resource_tracker)
+        try:
+            await self._process_single_document_core(
+                doc_id=doc_id,
+                status_doc=status_doc,
+                parsed_data=parsed_data,
+                ctx=ctx,
+                tracker=_resource_tracker,
+            )
+        finally:
+            # Persist the report even if the body raised - the user
+            # already paid the LLM/embedding cost, so the record must
+            # survive. Never let a save failure mask the original error.
+            deactivate_tracker(_tracker_token)
+            try:
+                _out = _resource_tracker.save(
+                    os.path.join(self.working_dir, "resource_metrics")
+                )
+                logger.info(f"[resource] report saved: {_out}")
+            except Exception as _e:
+                logger.error(f"[resource] failed to save report: {_e}")
+
+    async def _process_single_document_core(
+        self,
+        *,
+        doc_id: str,
+        status_doc: DocProcessingStatus,
+        parsed_data: dict[str, Any],
+        ctx: _BatchRunContext,
+        tracker: IngestionResourceTracker,
+    ) -> None:
+        """Single-document state machine body: chunking -> KG -> merge.
+
+        Body split out from process_single_document so the wrapper can
+        activate the resource tracker around it and persist the report in
+        a finally. tracker is the same object installed via contextvar;
+        passed explicitly for stage timing.
         """
         from lightrag.parser.routing import parse_process_options
 
@@ -3181,6 +3238,10 @@ class _PipelineMixin:
                 doc_process_opts = parse_process_options(
                     (content_data or {}).get("process_options", "")
                 )
+                tracker.file_path = file_path
+                tracker.process_options = (
+                    (content_data or {}).get("process_options", "") or ""
+                )
 
                 # Resume guard: if content was already extracted under
                 # earlier process_options, purge stale chunks + KG before
@@ -3237,6 +3298,7 @@ class _PipelineMixin:
                 # so admin/list APIs can see the actual chunker params used.
                 chunk_opts_str: str = ""
 
+                tracker.start_stage("chunking")
                 if doc_process_opts.chunking_explicit:
                     from lightrag.chunker import (
                         chunking_by_fixed_token,
@@ -3523,6 +3585,7 @@ class _PipelineMixin:
                 chunks = build_chunks_dict_from_chunking_result(
                     chunking_result, doc_id=doc_id, file_path=file_path
                 )
+                tracker.end_stage("chunking")
 
                 if not chunks:
                     logger.warning("No document chunks to process")
@@ -3565,6 +3628,7 @@ class _PipelineMixin:
                 # saved).  When the user opted out via process_options '!',
                 # skip extraction entirely; chunks remain in the vector
                 # store so naive / mix retrieval still works.
+                tracker.start_stage("entity_extraction")
                 if doc_process_opts.skip_kg:
                     logger.info(
                         f"[skip_kg] process_options '!' set for d-id: {doc_id}; "
@@ -3581,6 +3645,7 @@ class _PipelineMixin:
                         )
                     )
                     chunk_results = await entity_relation_task
+                tracker.end_stage("entity_extraction")
                 file_extraction_stage_ok = True
 
             except Exception as e:
@@ -3618,6 +3683,7 @@ class _PipelineMixin:
                     # nodes/edges to merge — but we still need to flush the
                     # chunks_vdb / text_chunks writes (already done above)
                     # and reach PROCESSED.
+                    tracker.start_stage("kg_merge")
                     if not doc_process_opts.skip_kg:
                         await merge_nodes_and_edges(
                             chunk_results=chunk_results,
@@ -3637,6 +3703,7 @@ class _PipelineMixin:
                             total_files=ctx.total_files,
                             file_path=file_path,
                         )
+                    tracker.end_stage("kg_merge")
 
                     # If another in-flight document already triggered an abort
                     # (e.g. a storage flush error set cancellation_requested),
@@ -3654,7 +3721,9 @@ class _PipelineMixin:
                     # where the status is durable but the graph/vector/chunk
                     # data is not — a false PROCESSED that recovery can never
                     # detect (issue #3400: status is the commit record).
+                    tracker.start_stage("flush")
                     await self._insert_done()
+                    tracker.end_stage("flush")
 
                     # A sibling document's flush error may have aborted the
                     # batch while our flush ran; do not mark PROCESSED during

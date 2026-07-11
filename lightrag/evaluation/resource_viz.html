@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>LightRAG 入库资源消耗可视化</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --card: #1a1d24; --border: #2a2e38; --fg: #e4e6eb;
+    --muted: #8b909c; --accent: #4ea1ff; --green: #4ade80; --orange: #fb923c;
+    --red: #f87171; --purple: #c084fc; --yellow: #facc15;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--fg); padding: 24px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 24px 0 12px; color: var(--muted); font-weight: 600;
+       text-transform: uppercase; letter-spacing: 0.5px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .upload { border: 2px dashed var(--border); border-radius: 10px; padding: 28px;
+            text-align: center; cursor: pointer; transition: 0.2s; margin-bottom: 24px; }
+  .upload:hover { border-color: var(--accent); background: rgba(78,161,255,0.05); }
+  .upload p { margin: 6px 0; color: var(--muted); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+           gap: 14px; margin-bottom: 8px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+          padding: 16px; }
+  .card .label { font-size: 12px; color: var(--muted); text-transform: uppercase;
+                 letter-spacing: 0.4px; }
+  .card .value { font-size: 26px; font-weight: 700; margin-top: 6px; }
+  .card .delta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .card.llm .value { color: var(--orange); }
+  .card.emb .value { color: var(--green); }
+  .card.cache .value { color: var(--purple); }
+  .card.time .value { color: var(--accent); }
+  .callout { background: var(--card); border: 1px solid var(--border);
+             border-left: 4px solid var(--orange); border-radius: 8px; padding: 16px 18px;
+             margin: 16px 0; font-size: 14px; line-height: 1.6; }
+  .callout .ratio { font-size: 28px; font-weight: 700; color: var(--orange); }
+  .callout .ratio small { font-size: 14px; color: var(--muted); font-weight: 400; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  .chart-box { background: var(--card); border: 1px solid var(--border);
+               border-radius: 10px; padding: 16px; height: 340px; position: relative; }
+  .chart-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px;
+       letter-spacing: 0.4px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .doc-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .doc-chip { background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+              padding: 6px 10px; font-size: 12px; cursor: pointer; }
+  .doc-chip.active { border-color: var(--accent); background: rgba(78,161,255,0.1); }
+  .doc-chip .x { color: var(--muted); margin-left: 6px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<h1>LightRAG 入库资源消耗可视化</h1>
+<p class="sub">加载 <code>resource_metrics/*.json</code> 报告，查看 LLM / Embedding 调用与 token 消耗。
+<strong>embedding 始终为 dense+sparse</strong>；KG 路径在其之上叠加 LLM 实体抽取 + 实体/关系 embedding，
+下列图表直观呈现该成本差异。</p>
+
+<label class="upload" for="fileinput">
+  <p>📁 点击或拖入 JSON 报告文件（可多选）</p>
+  <p style="font-size:12px">默认路径：&lt;working_dir&gt;/resource_metrics/doc-xxxx_*.json</p>
+  <input type="file" id="fileinput" accept=".json" multiple class="hidden" />
+</label>
+
+<div id="empty" class="callout" style="border-left-color:var(--muted)">尚未加载任何报告。</div>
+
+<div id="content" class="hidden">
+  <div class="doc-list" id="doclist"></div>
+
+  <h2>关键指标（当前选择）</h2>
+  <div class="cards" id="cards"></div>
+
+  <div class="callout" id="callout"></div>
+
+  <h2>成本结构对比</h2>
+  <div class="chart-box" style="height:360px"><div class="chart-title">Token 消耗分布（LLM input / LLM output / Embedding）— KG 的 LLM 成本 vs dense+sparse embedding 成本</div><canvas id="costChart"></canvas></div>
+
+  <h2>分项明细</h2>
+  <div class="grid2">
+    <div class="chart-box"><div class="chart-title">LLM 调用按阶段（extract 实体抽取 / summary 摘要）</div><canvas id="llmStageChart"></canvas></div>
+    <div class="chart-box"><div class="chart-title">Embedding 调用按命名空间（chunks / entities / relationships）</div><canvas id="embNsChart"></canvas></div>
+    <div class="chart-box"><div class="chart-title">各阶段耗时（毫秒）</div><canvas id="stageTimeChart"></canvas></div>
+    <div class="chart-box"><div class="chart-title">LLM token 按阶段（input vs output）</div><canvas id="llmTokenChart"></canvas></div>
+  </div>
+
+  <h2>文档明细表</h2>
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;overflow-x:auto">
+    <table id="table"><thead><tr>
+      <th>文档</th><th>process_options</th><th class="num">LLM调用</th><th class="num">缓存命中</th>
+      <th class="num">LLM input</th><th class="num">LLM output</th><th class="num">Embedding调用</th>
+      <th class="num">Embedding tokens</th><th class="num">阶段总耗时</th>
+    </tr></thead><tbody id="tbody"></tbody></table>
+  </div>
+</div>
+
+<script>
+let docs = [];          // all loaded reports
+let selectedIdx = new Set(); // selected indices; empty => all
+let charts = {};
+
+const fmt = n => (n||0).toLocaleString('en-US');
+const ms2s = ms => (ms/1000).toFixed(1) + 's';
+
+function destroy(id){ if (charts[id]) { charts[id].destroy(); delete charts[id]; } }
+function mkChart(id, cfg){ destroy(id); const ctx = document.getElementById(id).getContext('2d');
+  charts[id] = new Chart(ctx, cfg); }
+
+const PAL = { llmIn:'#fb923c', llmOut:'#f87171', emb:'#4ade80', extract:'#4ea1ff',
+  summary:'#c084fc', chunks:'#4ade80', entities:'#facc15', relationships:'#c084fc',
+  chunking:'#64748b', extraction:'#4ea1ff', merge:'#fb923c', flush:'#4ade80' };
+
+function selectedDocs(){
+  if (selectedIdx.size === 0) return docs;
+  return docs.filter((_,i)=>selectedIdx.has(i));
+}
+
+function render(){
+  const sel = selectedDocs();
+  if (sel.length === 0) return;
+  // aggregate
+  const agg = sel.reduce((a,d)=>{
+    const t = d.summary.totals;
+    a.llm_calls += t.llm_calls; a.llm_cache += t.llm_cache_hits;
+    a.llm_in += t.llm_input_tokens; a.llm_out += t.llm_output_tokens;
+    a.emb_calls += t.embedding_calls; a.emb_tokens += t.embedding_token_count;
+    a.emb_texts += t.embedding_text_count;
+    a.wall += t.stage_wall_ms;
+    return a;
+  }, {llm_calls:0,llm_cache:0,llm_in:0,llm_out:0,emb_calls:0,emb_tokens:0,emb_texts:0,wall:0});
+
+  // cards
+  const cacheRate = agg.llm_calls ? (agg.llm_cache/agg.llm_calls*100).toFixed(1) : '0.0';
+  document.getElementById('cards').innerHTML = [
+    card('LLM 调用次数', fmt(agg.llm_calls), `缓存命中 ${fmt(agg.llm_cache)} (${cacheRate}%)`, 'llm'),
+    card('LLM input tokens', fmt(agg.llm_in), '实体抽取 + 摘要 prompt', 'llm'),
+    card('LLM output tokens', fmt(agg.llm_out), '模型生成', 'llm'),
+    card('Embedding 调用次数', fmt(agg.emb_calls), `${fmt(agg.emb_texts)} 条文本 (dense+sparse)`, 'emb'),
+    card('Embedding tokens', fmt(agg.emb_tokens), 'chunk + entity + relation', 'emb'),
+    card('阶段总耗时', ms2s(agg.wall), 'chunking + extraction + merge + flush', 'time'),
+  ].join('');
+
+  // callout: KG (LLM) vs dense+sparse (embedding) cost ratio
+  const llmTotal = agg.llm_in + agg.llm_out;
+  const ratio = agg.emb_tokens ? (llmTotal / agg.emb_tokens) : Infinity;
+  const ratioStr = isFinite(ratio) ? ratio.toFixed(1) + '×' : '∞';
+  const skipKg = sel.some(d => d.summary.process_options && d.summary.process_options.includes('!'));
+  let calloutHtml;
+  if (skipKg && !agg.llm_calls) {
+    calloutHtml = `<div>当前为 <strong style="color:var(--green)">纯 dense+sparse 模式</strong>（process_options 含 <code>!</code>，跳过 KG）：
+      <strong>0</strong> 次 LLM 调用，仅 embedding 成本 <strong style="color:var(--green)">${fmt(agg.emb_tokens)}</strong> tokens。
+      对比下方完整 KG 入库记录可见成本差异。</div>`;
+  } else {
+    calloutHtml = `<div>完整 <strong style="color:var(--orange)">dense+sparse+KG</strong> 入库：
+      LLM 消耗 <strong style="color:var(--orange)">${fmt(llmTotal)}</strong> tokens（其中 input ${fmt(agg.llm_in)} + output ${fmt(agg.llm_out)}），
+      embedding 消耗 <strong style="color:var(--green)">${fmt(agg.emb_tokens)}</strong> tokens。
+      <div class="ratio" style="margin-top:8px">${ratioStr} <small>LLM token 是 embedding token 的倍数 — KG 路径的高成本来自 LLM 实体抽取</small></div></div>`;
+  }
+  document.getElementById('callout').innerHTML = calloutHtml;
+
+  // cost chart: stacked bar per doc
+  mkChart('costChart', {
+    type:'bar',
+    data:{ labels: sel.map(d=>shortName(d)),
+      datasets:[
+        {label:'LLM input', data:sel.map(d=>d.summary.totals.llm_input_tokens), backgroundColor:PAL.llmIn},
+        {label:'LLM output', data:sel.map(d=>d.summary.totals.llm_output_tokens), backgroundColor:PAL.llmOut},
+        {label:'Embedding', data:sel.map(d=>d.summary.totals.embedding_token_count), backgroundColor:PAL.emb},
+      ]},
+    options:{ responsive:true, maintainAspectRatio:false,
+      scales:{ x:{stacked:true,ticks:{color:'#8b909c'},grid:{color:'#2a2e38'}},
+               y:{stacked:true,ticks:{color:'#8b909c'},grid:{color:'#2a2e38'}} },
+      plugins:{ legend:{labels:{color:'#e4e6eb'}} } }
+  });
+
+  // LLM by stage (calls)
+  const stages = collectStages(sel, 'llm_by_stage');
+  mkChart('llmStageChart', {
+    type:'bar',
+    data:{ labels:['实体抽取 (extract)','摘要 (summary)'],
+      datasets:[{label:'调用次数', data:[stages.extract?.calls||0, stages.summary?.calls||0], backgroundColor:[PAL.extract,PAL.summary]}]},
+    options:{ responsive:true, maintainAspectRatio:false,
+      scales:{ y:{ticks:{color:'#8b909c'},grid:{color:'#2a2e38'}}, x:{ticks:{color:'#8b909c'},grid:{color:'#2a2e38'}} },
+      plugins:{ legend:{display:false} } }
+  });
+
+  // embedding by namespace
+  const nss = collectStages(sel, 'embedding_by_namespace');
+  const nsKeys = Object.keys(nss);
+  mkChart('embNsChart', {
+    type:'bar',
+    data:{ labels: nsKeys.length?nsKeys:['(无)'],
+      datasets:[{label:'token 数', data: nsKeys.length?nsKeys.map(k=>nss[k].token_count):[0],
+        backgroundColor: nsKeys.map(k=>PAL[k]||'#94a3b8')}]},
+    options:{ responsive:true, maintainAspectRatio:false,
+      scales:{ y:{ticks:{color:'#8b909c'},grid:{color:'#2a2e38'}}, x:{ticks:{color:'#8b909c'},grid:{color:'#2a2e38'}} },
+      plugins:{ legend:{display:false} } }
+  });
+
+  // stage timing
+  const stageNames = ['chunking','entity_extraction','kg_merge','flush'];
+  const stageLabels = ['Chunking','实体抽取','KG Merge','Flush(embedding)'];
+  const stageData = stageNames.map(n => sel.reduce((a,d)=>a + (d.summary.stages_ms[n]||0), 0));
+  mkChart('stageTimeChart', {
+    type:'bar',
+    data:{ labels: stageLabels,
+      datasets:[{label:'耗时(ms)', data:stageData, backgroundColor:[PAL.chunking,PAL.extraction,PAL.merge,PAL.flush]}]},
+    options:{ responsive:true, maintainAspectRatio:false,
+      scales:{ y:{ticks:{color:'#8b909c'},grid:{color:'#2a2e38'}}, x:{ticks:{color:'#8b909c'},grid:{color:'#2a2e38'}} },
+      plugins:{ legend:{display:false} } }
+  });
+
+  // LLM tokens by stage (input vs output)
+  mkChart('llmTokenChart', {
+    type:'bar',
+    data:{ labels:['实体抽取 (extract)','摘要 (summary)'],
+      datasets:[
+        {label:'input tokens', data:[stages.extract?.input_tokens||0, stages.summary?.input_tokens||0], backgroundColor:PAL.llmIn},
+        {label:'output tokens', data:[stages.extract?.output_tokens||0, stages.summary?.output_tokens||0], backgroundColor:PAL.llmOut},
+      ]},
+    options:{ responsive:true, maintainAspectRatio:false,
+      scales:{ y:{ticks:{color:'#8b909c'},grid:{color:'#2a2e38'}}, x:{ticks:{color:'#8b909c'},grid:{color:'#2a2e38'}} },
+      plugins:{ legend:{labels:{color:'#e4e6eb'}} } }
+  });
+
+  // table
+  document.getElementById('tbody').innerHTML = sel.map(d=>{
+    const t = d.summary.totals;
+    return `<tr><td>${shortName(d)}</td><td>${d.summary.process_options||'-'}</td>
+      <td class="num">${fmt(t.llm_calls)}</td><td class="num">${fmt(t.llm_cache_hits)}</td>
+      <td class="num">${fmt(t.llm_input_tokens)}</td><td class="num">${fmt(t.llm_output_tokens)}</td>
+      <td class="num">${fmt(t.embedding_calls)}</td><td class="num">${fmt(t.embedding_token_count)}</td>
+      <td class="num">${ms2s(t.stage_wall_ms)}</td></tr>`;
+  }).join('');
+}
+
+function card(label, value, delta, cls){
+  return `<div class="card ${cls}"><div class="label">${label}</div><div class="value">${value}</div><div class="delta">${delta}</div></div>`;
+}
+function shortName(d){
+  const fp = d.file_path || d.doc_id;
+  const base = fp.split(/[\\\/]/).pop() || d.doc_id;
+  return base.length > 28 ? base.slice(0,25)+'…' : base;
+}
+function collectStages(sel, key){
+  const out = {};
+  sel.forEach(d=>{
+    const m = d.summary[key] || {};
+    Object.entries(m).forEach(([k,v])=>{
+      if(!out[k]) out[k] = {calls:0,cache_hits:0,input_tokens:0,output_tokens:0,text_count:0,token_count:0,duration_ms:0};
+      out[k].calls += v.calls||0; out[k].cache_hits += v.cache_hits||0;
+      out[k].input_tokens += v.input_tokens||0; out[k].output_tokens += v.output_tokens||0;
+      out[k].text_count += v.text_count||0; out[k].token_count += v.token_count||0;
+      out[k].duration_ms += v.duration_ms||0;
+    });
+  });
+  return out;
+}
+
+function renderDocList(){
+  const el = document.getElementById('doclist');
+  el.innerHTML = docs.map((d,i)=>{
+    const active = selectedIdx.size===0 || selectedIdx.has(i);
+    return `<span class="doc-chip ${active?'active':''}" data-i="${i}">${shortName(d)}<span class="x" data-x="${i}"> ✕</span></span>`;
+  }).join('');
+  el.querySelectorAll('.doc-chip').forEach(c=>{
+    c.addEventListener('click', e=>{
+      if(e.target.dataset.x!==undefined){ e.stopPropagation(); return; }
+      const i = +c.dataset.i;
+      if(selectedIdx.has(i)) selectedIdx.delete(i); else selectedIdx.add(i);
+      if(selectedIdx.size===docs.length) selectedIdx.clear();
+      renderDocList(); render();
+    });
+  });
+  el.querySelectorAll('[data-x]').forEach(x=>{
+    x.addEventListener('click', e=>{
+      e.stopPropagation(); const i = +x.dataset.x;
+      docs.splice(i,1); selectedIdx.clear();
+      renderDocList(); render();
+    });
+  });
+}
+
+document.getElementById('fileinput').addEventListener('change', async (e)=>{
+  const files = Array.from(e.target.files);
+  for(const f of files){
+    try{ const j = JSON.parse(await f.text()); if(j.doc_id!==undefined) docs.push(j); }
+    catch(err){ alert('解析失败: '+f.name+'\n'+err.message); }
+  }
+  selectedIdx.clear();
+  document.getElementById('empty').classList.toggle('hidden', docs.length>0);
+  document.getElementById('content').classList.toggle('hidden', docs.length===0);
+  renderDocList(); render();
+});
+
+// drag & drop
+const drop = document.querySelector('.upload');
+drop.addEventListener('dragover', e=>{e.preventDefault(); drop.style.borderColor='var(--accent)';});
+drop.addEventListener('dragleave', ()=>drop.style.borderColor='var(--border)');
+drop.addEventListener('drop', async e=>{
+  e.preventDefault(); drop.style.borderColor='var(--border)';
+  const files = Array.from(e.dataTransfer.files).filter(f=>f.name.endsWith('.json'));
+  for(const f of files){
+    try{ const j = JSON.parse(await f.text()); if(j.doc_id!==undefined) docs.push(j); }catch(err){}
+  }
+  selectedIdx.clear();
+  document.getElementById('empty').classList.toggle('hidden', docs.length>0);
+  document.getElementById('content').classList.toggle('hidden', docs.length===0);
+  renderDocList(); render();
+});
+</script>
+</body>
+</html>

@@ -559,6 +559,7 @@ async def _summarize_descriptions(
         llm_response_cache=llm_response_cache,
         cache_type="summary",
         llm_cache_identity=get_llm_cache_identity(global_config, "extract"),
+        source_label=description_name,
     )
 
     # The LLM response is the only description path that bypasses

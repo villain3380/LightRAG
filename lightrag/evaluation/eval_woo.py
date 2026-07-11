@@ -94,6 +94,18 @@ try:
     from langchain_openai import ChatOpenAI, OpenAIEmbeddings
     from tqdm.auto import tqdm
 
+    # RAGAS 0.4.3 calls embed_text() / embed_texts() / aembed_text() /
+    # aembed_texts() which don't exist on older langchain-openai / langchain-core.
+    # Add both sync and async aliases (RAGAS calls the async variants internally).
+    if not hasattr(OpenAIEmbeddings, "embed_text"):
+        OpenAIEmbeddings.embed_text = lambda self, text: self.embed_query(text)
+    if not hasattr(OpenAIEmbeddings, "embed_texts"):
+        OpenAIEmbeddings.embed_texts = lambda self, texts: self.embed_documents(texts)
+    if not hasattr(OpenAIEmbeddings, "aembed_text"):
+        OpenAIEmbeddings.aembed_text = lambda self, text: self.aembed_query(text)
+    if not hasattr(OpenAIEmbeddings, "aembed_texts"):
+        OpenAIEmbeddings.aembed_texts = lambda self, texts: self.aembed_documents(texts)
+
     RAGAS_AVAILABLE = True
 
 except ImportError:
@@ -113,13 +125,21 @@ def _is_nan(value: Any) -> bool:
     return isinstance(value, float) and math.isnan(value)
 
 
-class _DashScopeEmbeddings:
+try:
+    from langchain_core.embeddings import Embeddings as _LCEmeddings
+except ImportError:
+    _LCEmeddings = object  # type: ignore[assignment,misc]
+
+
+class _DashScopeEmbeddings(_LCEmeddings):
     """Wrap dashscope_embed for LangChain Embeddings / RAGAS compatibility.
 
-    RAGAS ``evaluate(embeddings=...)`` requires sync ``embed_documents`` /
-    ``embed_query`` methods.  ``dashscope_embed`` is async; RAGAS calls the
+    Inherits from ``langchain_core.embeddings.Embeddings`` so that RAGAS
+    internals (``embedding_factory``) recognise it as a valid LangChain
+    embedding provider.  ``dashscope_embed`` is async; RAGAS calls the
     sync methods from inside a running event loop, so we bridge via a
-    dedicated thread (new event loop) which is safe from any calling context.
+    dedicated thread (new event loop) which is safe from any calling
+    context.
     """
 
     def __init__(self, api_key: str | None = None, model: str | None = None):
@@ -131,6 +151,12 @@ class _DashScopeEmbeddings:
 
     def embed_query(self, text: str) -> list[list[float]]:
         return self._run([text], context="query")[0]
+
+    def embed_text(self, text: str) -> list[float]:
+        return self.embed_query(text)
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return self.embed_documents(texts)
 
     def _run(self, texts: list[str], context: str) -> list[list[float]]:
         import threading
@@ -550,11 +576,11 @@ class RAGEvaluator:
                     eval_results = evaluate(
                         dataset=eval_dataset,
                         metrics=[
-                            Faithfulness(),
-                            AnswerRelevancy(),
-                            AnswerCorrectness(),
-                            ContextRecall(),
-                            ContextPrecision(),
+                            Faithfulness(llm=self.eval_llm),
+                            AnswerRelevancy(llm=self.eval_llm, embeddings=self.eval_embeddings),
+                            AnswerCorrectness(llm=self.eval_llm, embeddings=self.eval_embeddings),
+                            ContextRecall(llm=self.eval_llm),
+                            ContextPrecision(llm=self.eval_llm),
                         ],
                         llm=self.eval_llm,
                         embeddings=self.eval_embeddings,
@@ -1142,5 +1168,6 @@ Examples:
         sys.exit(1)
 
 
+# python eval_woo.py -d dataset/dataset_woo_1.json
 if __name__ == "__main__":
     asyncio.run(main())
