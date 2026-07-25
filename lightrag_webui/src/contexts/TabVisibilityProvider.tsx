@@ -20,7 +20,8 @@ export const TabVisibilityProvider: React.FC<TabVisibilityProviderProps> = ({ ch
     'documents': true,
     'knowledge-graph': true,
     'retrieval': true,
-    'api': true
+    'api': true,
+    'agent': true
   }));
 
   // Keep all tabs visible because we use CSS to control TAB visibility instead of React.

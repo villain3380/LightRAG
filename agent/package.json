@@ -29,7 +29,9 @@
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
-		"@earendil-works/pi-ai": "^0.80.10",
+		"@earendil-works/pi-ai": "^0.82.1",
+		"@hono/node-server": "^2.0.11",
+		"hono": "^4.12.32",
 		"ignore": "7.0.5",
 		"typebox": "1.1.38",
 		"yaml": "2.9.0"
@@ -54,6 +56,7 @@
 	"devDependencies": {
 		"@types/node": "24.12.4",
 		"@vitest/coverage-v8": "4.1.9",
+		"tsx": "^4.23.1",
 		"typescript": "5.9.3",
 		"vitest": "4.1.9"
 	}

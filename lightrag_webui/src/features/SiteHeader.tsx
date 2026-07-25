@@ -53,6 +53,9 @@ function TabsNavigation() {
         <NavigationTab value="traces" currentTab={currentTab}>
           {t('header.traces')}
         </NavigationTab>
+        <NavigationTab value="agent" currentTab={currentTab}>
+          Agent
+        </NavigationTab>
       </TabsList>
     </div>
   )

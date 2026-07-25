@@ -16,6 +16,7 @@ import DocumentManager from '@/features/DocumentManager'
 import RetrievalView from '@/features/RetrievalView'
 import ApiSite from '@/features/ApiSite'
 import TracesView from '@/features/TracesView'
+import Agent from '@/features/Agent'
 
 import { Tabs, TabsContent } from '@/components/ui/Tabs'
 
@@ -221,6 +222,9 @@ function App() {
                 </TabsContent>
                 <TabsContent value="traces" className="absolute top-0 right-0 bottom-0 left-0 overflow-hidden">
                   <TracesView />
+                </TabsContent>
+                <TabsContent value="agent" className="absolute top-0 right-0 bottom-0 left-0 overflow-auto">
+                  <Agent />
                 </TabsContent>
               </div>
             </Tabs>
