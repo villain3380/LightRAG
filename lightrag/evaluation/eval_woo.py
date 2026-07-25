@@ -91,6 +91,7 @@ try:
         Faithfulness,
     )
     from ragas.llms import LangchainLLMWrapper
+    from ragas.run_config import RunConfig
     from langchain_openai import ChatOpenAI, OpenAIEmbeddings
     from tqdm.auto import tqdm
 
@@ -188,7 +189,7 @@ class _DashScopeEmbeddings(_LCEmeddings):
 class RAGEvaluator:
     """Evaluate RAG system quality using RAGAS metrics"""
 
-    def __init__(self, test_dataset_path: str = None, rag_api_url: str = None):
+    def __init__(self, test_dataset_path: str = None, rag_api_url: str = None, query_mode: str = "mix"):
         """
         Initialize evaluator with test dataset
 
@@ -302,6 +303,7 @@ class RAGEvaluator:
 
         self.test_dataset_path = Path(test_dataset_path)
         self.rag_api_url = rag_api_url.rstrip("/")
+        self.query_mode = query_mode
         self.results_dir = Path(__file__).parent / "results"
         self.results_dir.mkdir(exist_ok=True)
 
@@ -392,7 +394,7 @@ class RAGEvaluator:
         try:
             payload = {
                 "query": question,
-                "mode": "mix",
+                "mode": self.query_mode,
                 "include_references": True,
                 "include_chunk_content": True,  # NEW: Request chunk content in references
                 "response_type": "Multiple Paragraphs",
@@ -446,16 +448,14 @@ class RAGEvaluator:
                 elif isinstance(content, str):
                     # Backward compatibility: if content is still a string (shouldn't happen)
                     contexts.append(content)
-                # Record WHICH references were retrieved (file-level id + chunk count),
-                # NOT the full chunk text — keeps the persisted result compact and
-                # lets you audit which files fed each answer.
+                # Record WHICH chunks were retrieved: chunk_id traces back to the
+                # retrieval trace JSON; reference_id is the inline citation [^n];
+                # file_path is the source file.
                 context_refs.append(
                     {
                         "reference_id": ref.get("reference_id", ""),
                         "file_path": ref.get("file_path", ""),
-                        "chunks": len(content)
-                        if isinstance(content, list)
-                        else (1 if content else 0),
+                        "chunk_id": ref.get("chunk_id", ""),
                     }
                 )
 
@@ -573,6 +573,16 @@ class RAGEvaluator:
                         # Give tqdm time to initialize and claim its screen position
                         await asyncio.sleep(0.05)
 
+                    # Override RAGAS RunConfig: default timeout=180s is too short
+                    # for deepseek on long RAGAS prompts. Use EVAL_LLM_TIMEOUT and
+                    # cap retries so a hung metric doesn't block for 30+ minutes.
+                    eval_run_config = RunConfig(
+                        timeout=int(os.getenv("EVAL_LLM_TIMEOUT", "600")),
+                        max_retries=int(os.getenv("EVAL_LLM_MAX_RETRIES", "5")),
+                        max_wait=60,
+                        max_workers=16,
+                    )
+
                     eval_results = evaluate(
                         dataset=eval_dataset,
                         metrics=[
@@ -584,6 +594,7 @@ class RAGEvaluator:
                         ],
                         llm=self.eval_llm,
                         embeddings=self.eval_embeddings,
+                        run_config=eval_run_config,
                         _pbar=pbar,
                     )
 
@@ -1153,6 +1164,17 @@ Examples:
             help="LightRAG API endpoint URL (default: http://localhost:9621 or $LIGHTRAG_API_URL environment variable)",
         )
 
+        parser.add_argument(
+            "--mode",
+            "-m",
+            type=str,
+            default="mix",
+            choices=["naive", "local", "global", "hybrid", "mix"],
+            help="LightRAG query mode (default: mix). "
+                 "'naive' = vector-only (no KG); 'mix' = KG + vector (full). "
+                 "Use 'naive' vs 'mix' to measure KG contribution.",
+        )
+
         args = parser.parse_args()
 
         logger.info("%s", "=" * 70)
@@ -1160,7 +1182,9 @@ Examples:
         logger.info("%s", "=" * 70)
 
         evaluator = RAGEvaluator(
-            test_dataset_path=args.dataset, rag_api_url=args.ragendpoint
+            test_dataset_path=args.dataset,
+            rag_api_url=args.ragendpoint,
+            query_mode=args.mode,
         )
         await evaluator.run()
     except Exception as e:
@@ -1168,6 +1192,6 @@ Examples:
         sys.exit(1)
 
 
-# python eval_woo.py -d dataset/dataset_woo_1.json
+# python eval_woo.py -d dataset/dataset_woo_1.json --mode naive
 if __name__ == "__main__":
     asyncio.run(main())

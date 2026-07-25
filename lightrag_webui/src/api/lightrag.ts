@@ -696,7 +696,7 @@ export const getSupportedFileTypes = async (signal?: AbortSignal): Promise<Suppo
 }
 
 export const getDocumentChunks = async (docId: string): Promise<DocumentChunksResponse> => {
-  const response = axiosInstance.get(`/documents/${encodeURIComponent(docId)}/chunks`)
+  const response = await axiosInstance.get(`/documents/${encodeURIComponent(docId)}/chunks`)
   return response.data
 }
 
