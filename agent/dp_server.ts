@@ -18,6 +18,7 @@ import { Type } from "typebox";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
+import { streamSSE } from "hono/streaming";
 
 // deepseekProvider 读 DEEPSEEK_API_KEY，.env 用 LLM_BINDING_API_KEY，映射
 process.env.DEEPSEEK_API_KEY =
@@ -190,26 +191,27 @@ app.post("/api/content", async (c) => {
   return c.json({ content_id: id });
 });
 
-// agent 对话（非流式，先简单；后续可改 SSE 流式）
+// agent 对话（SSE 流式，逐 chunk 推送）
 app.post("/api/chat", async (c) => {
   const { message } = await c.req.json<{ message: string }>();
   if (!message) return c.json({ error: "message required" }, 400);
-  let response = "";
-  const unsub = agent.subscribe((event: any) => {
-    if (
-      event.type === "message_update" &&
-      event.assistantMessageEvent?.type === "text_delta"
-    ) {
-      response += event.assistantMessageEvent.delta;
+  return streamSSE(c, async (stream) => {
+    const unsub = agent.subscribe(async (event: any) => {
+      if (
+        event.type === "message_update" &&
+        event.assistantMessageEvent?.type === "text_delta"
+      ) {
+        await stream.writeSSE({ data: event.assistantMessageEvent.delta });
+      }
+    });
+    try {
+      await agent.prompt(message);
+    } catch (e: any) {
+      await stream.writeSSE({ data: `\n[error: ${e.message}]` });
     }
+    unsub();
+    await stream.writeSSE({ data: "[DONE]" });
   });
-  try {
-    await agent.prompt(message);
-  } catch (e: any) {
-    response += `\n[error: ${e.message}]`;
-  }
-  unsub();
-  return c.json({ response });
 });
 
 serve({ fetch: app.fetch, port: 9956 }, (info) => {
