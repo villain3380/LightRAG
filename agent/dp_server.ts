@@ -19,6 +19,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
 import { streamSSE } from "hono/streaming";
+import pg from "pg";
 
 // deepseekProvider 读 DEEPSEEK_API_KEY，.env 用 LLM_BINDING_API_KEY，映射
 process.env.DEEPSEEK_API_KEY =
@@ -181,6 +182,51 @@ app.use(
 
 app.get("/api/health", (c) => c.json({ status: "ok" }));
 
+// === PG 连接（agent_session 持久化） ===
+const pgPool = new pg.Pool({
+  host: "localhost",
+  port: 5432,
+  user: "agent_session_writer",
+  password: process.env.AGENT_SESSION_PWD || "asw_2026",
+  database: "rag",
+});
+
+// === 会话端点 ===
+// 新建会话
+app.post("/api/sessions", async (c) => {
+  const { title } = await c.req.json().catch(() => ({}));
+  const r = await pgPool.query(
+    "INSERT INTO agent_session.session(title) VALUES($1) RETURNING id, title, created_at",
+    [title || null]
+  );
+  return c.json(r.rows[0]);
+});
+
+// 会话列表
+app.get("/api/sessions", async (c) => {
+  const r = await pgPool.query(
+    "SELECT id, title, created_at, updated_at FROM agent_session.session ORDER BY updated_at DESC LIMIT 50"
+  );
+  return c.json(r.rows);
+});
+
+// 恢复会话消息
+app.get("/api/sessions/:id", async (c) => {
+  const id = c.req.param("id");
+  const r = await pgPool.query(
+    "SELECT id, session_id, role, content, display_content, tool_name, tool_args, tool_result, response_time FROM agent_session.message WHERE session_id=$1 ORDER BY created_at",
+    [id]
+  );
+  return c.json(r.rows);
+});
+
+// 删除会话
+app.delete("/api/sessions/:id", async (c) => {
+  const id = c.req.param("id");
+  await pgPool.query("DELETE FROM agent_session.session WHERE id=$1", [id]);
+  return c.json({ status: "ok" });
+});
+
 // 暂存 content，返回编号
 app.post("/api/content", async (c) => {
   const { content } = await c.req.json<{ content: string }>();
@@ -191,26 +237,64 @@ app.post("/api/content", async (c) => {
   return c.json({ content_id: id });
 });
 
-// agent 对话（SSE 流式，逐 chunk 推送）
+// agent 对话（SSE 流式 + 持久化到 agent_session）
 app.post("/api/chat", async (c) => {
-  const { message } = await c.req.json<{ message: string }>();
+  const { message, session_id } = await c.req.json<{ message: string; session_id?: number }>();
   if (!message) return c.json({ error: "message required" }, 400);
+  if (!session_id) return c.json({ error: "session_id required" }, 400);
+
+  // 存 user 消息
+  await pgPool.query(
+    "INSERT INTO agent_session.message(session_id, role, content) VALUES($1, 'user', $2)",
+    [session_id, message]
+  );
+
+  let agentText = "";
+
   return streamSSE(c, async (stream) => {
     const unsub = agent.subscribe(async (event: any) => {
-      if (
-        event.type === "message_update" &&
-        event.assistantMessageEvent?.type === "text_delta"
-      ) {
-        await stream.writeSSE({ data: event.assistantMessageEvent.delta });
+      if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
+        agentText += event.assistantMessageEvent.delta;
+        await stream.writeSSE({ data: JSON.stringify({ type: "text", delta: event.assistantMessageEvent.delta }) });
+      } else if (event.type === "tool_execution_start") {
+        // 工具前文本存 assistant 消息（如果有）
+        if (agentText.trim()) {
+          await pgPool.query(
+            "INSERT INTO agent_session.message(session_id, role, content, display_content) VALUES($1, 'assistant', $2, $3)",
+            [session_id, agentText, agentText]
+          );
+          agentText = "";
+        }
+        await stream.writeSSE({ data: JSON.stringify({ type: "tool_call", id: event.toolCallId, name: event.toolName, args: event.args }) });
+      } else if (event.type === "tool_execution_end") {
+        const result = event.result?.details ?? event.result;
+        // 存 tool_call 消息
+        await pgPool.query(
+          "INSERT INTO agent_session.message(session_id, role, tool_name, tool_args, tool_result) VALUES($1, 'tool_call', $2, $3, $4)",
+          [session_id, event.toolName, JSON.stringify(event.args), JSON.stringify(result)]
+        );
+        await stream.writeSSE({ data: JSON.stringify({ type: "tool_result", id: event.toolCallId, name: event.toolName, result }) });
       }
     });
     try {
       await agent.prompt(message);
     } catch (e: any) {
-      await stream.writeSSE({ data: `\n[error: ${e.message}]` });
+      await stream.writeSSE({ data: JSON.stringify({ type: "error", message: e.message }) });
     }
     unsub();
-    await stream.writeSSE({ data: "[DONE]" });
+    // 存剩余 agentText（工具后文本）
+    if (agentText.trim()) {
+      await pgPool.query(
+        "INSERT INTO agent_session.message(session_id, role, content, display_content) VALUES($1, 'assistant', $2, $3)",
+        [session_id, agentText, agentText]
+      );
+    }
+    // 更新 session.updated_at + title（首条消息摘要）
+    await pgPool.query(
+      "UPDATE agent_session.session SET updated_at=now(), title=COALESCE(NULLIF(title, ''), $2) WHERE id=$1",
+      [session_id, message.slice(0, 50)]
+    );
+    await stream.writeSSE({ data: JSON.stringify({ type: "done" }) });
   });
 });
 

@@ -8,7 +8,7 @@ import { useDebounce } from '@/hooks/useDebounce'
 import { throttle } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settings'
 import { copyToClipboard } from '@/utils/clipboard'
-import { CopyIcon, EraserIcon, PlusIcon, SendIcon, SquareIcon, TrashIcon } from 'lucide-react'
+import { CopyIcon, EraserIcon, PlusIcon, SendIcon, SquareIcon, TrashIcon, WrenchIcon } from 'lucide-react'
 import { toast } from 'sonner'
 
 const AGENT_API = 'http://localhost:9956'
@@ -46,6 +46,43 @@ export default function Agent() {
     { key: 1, text: '', storedId: null },
   ])
   const [nextKey, setNextKey] = useState(2)
+
+  // 会话管理
+  const [sessions, setSessions] = useState<any[]>([])
+  const [currentSessionId, setCurrentSessionId] = useState<number | null>(null)
+
+  const loadSessions = useCallback(async () => {
+    try {
+      const r = await fetch(`${AGENT_API}/api/sessions`)
+      const data = await r.json()
+      setSessions(data)
+    } catch {}
+  }, [])
+
+  const createSession = useCallback(async () => {
+    const r = await fetch(`${AGENT_API}/api/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
+    const data = await r.json()
+    setCurrentSessionId(data.id)
+    setMessages([])
+    loadSessions()
+  }, [loadSessions])
+
+  const selectSession = useCallback(async (id: number) => {
+    const r = await fetch(`${AGENT_API}/api/sessions/${id}`)
+    const data = await r.json()
+    setCurrentSessionId(id)
+    const msgs: MessageWithError[] = (data as any[]).map((m) => ({
+      id: generateUniqueId(),
+      content: m.content || '',
+      role: m.role === 'tool_call' ? 'assistant' : m.role,
+      displayContent: m.display_content || m.content || '',
+      toolCall: m.role === 'tool_call' ? { name: m.tool_name, args: m.tool_args, result: m.tool_result } : undefined,
+      responseTime: m.response_time || 0,
+    })) as any
+    setMessages(msgs)
+  }, [])
+
+  useEffect(() => { loadSessions() }, [loadSessions])
 
   // ── 聊天 ──
   const [messages, setMessages] = useState<MessageWithError[]>([])
@@ -175,16 +212,26 @@ export default function Agent() {
       abortRef.current = controller
 
       try {
+        // 如果没有当前会话，自动新建
+        let sessionId = currentSessionId
+        if (!sessionId) {
+          const sr = await fetch(`${AGENT_API}/api/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
+          const sdata = await sr.json()
+          sessionId = sdata.id
+          setCurrentSessionId(sdata.id)
+          loadSessions()
+        }
         const r = await fetch(`${AGENT_API}/api/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: userMsg }),
+          body: JSON.stringify({ message: userMsg, session_id: sessionId }),
           signal: controller.signal,
         })
         if (!r.body) throw new Error('无响应体')
         const reader = r.body.getReader()
         const decoder = new TextDecoder()
-        let agentText = ''
+        let currentText = ''
+        let currentId = assistantMessage.id
         let buffer = ''
 
         while (true) {
@@ -196,26 +243,34 @@ export default function Agent() {
           for (const line of lines) {
             if (line.startsWith('data:')) {
               const data = line.slice(5).trim()
-              if (data === '[DONE]') break
-              // 后端 delta 是纯文本；JSON.parse 仅在恰好是合法 JSON 字符串时生效，否则原样使用
-              let delta: string = data
-              try {
-                const parsed = JSON.parse(data)
-                delta = typeof parsed === 'string' ? parsed : data
-              } catch {
-                // 非 JSON，直接用
-              }
-              agentText += delta
-              setMessages((prev) => {
-                const newMsgs = [...prev]
-                const last = newMsgs[newMsgs.length - 1]
-                if (last && last.id === assistantMessage.id) {
-                  last.content = agentText
-                }
-                return newMsgs
-              })
-              if (shouldFollowScrollRef.current) {
-                setTimeout(() => scrollToBottom(), 30)
+              if (!data) continue
+              let msg: any
+              try { msg = JSON.parse(data) } catch { continue }
+              if (msg.type === 'done') break
+              if (msg.type === 'text') {
+                currentText += msg.delta
+                setMessages((prev) => {
+                  const newMsgs = [...prev]
+                  const target = newMsgs.find((m) => m.id === currentId)
+                  if (target) {
+                    target.content = currentText
+                    target.displayContent = currentText
+                  }
+                  return newMsgs
+                })
+                if (shouldFollowScrollRef.current) setTimeout(() => scrollToBottom(), 30)
+              } else if (msg.type === 'tool_call') {
+                setMessages((prev) => [
+                  ...prev,
+                  { id: msg.id || generateUniqueId(), content: '', role: 'assistant', toolCall: { name: msg.name, args: msg.args, result: undefined }, responseTime: 0 } as any,
+                ])
+                if (shouldFollowScrollRef.current) setTimeout(() => scrollToBottom(), 30)
+              } else if (msg.type === 'tool_result') {
+                setMessages((prev) => prev.map((m) => m.id === msg.id ? { ...m, toolCall: { ...(m as any).toolCall, result: msg.result } } as any : m))
+                // 工具结果后，新建 assistant 消息承接工具后的回复
+                currentText = ''
+                currentId = generateUniqueId()
+                setMessages((prev) => [...prev, { id: currentId, content: '', role: 'assistant', displayContent: '', responseTime: 0 } as any])
               }
             }
           }
@@ -257,7 +312,7 @@ export default function Agent() {
         activeAssistantIdRef.current = null
       }
     },
-    [input, loading, scrollToBottom]
+    [input, loading, scrollToBottom, currentSessionId, loadSessions]
   )
 
   const handleKeyDown = useCallback(
@@ -520,7 +575,29 @@ export default function Agent() {
   }, [])
 
   return (
-    <div className="flex size-full px-2 pb-12 overflow-hidden">
+    <div className="flex size-full flex-col overflow-hidden">
+      {/* 顶部会话栏 */}
+      <div className="flex shrink-0 items-center gap-2 border-b px-2 py-1">
+        <Button variant="outline" size="sm" onClick={createSession}>
+          <PlusIcon className="size-4" />新建会话
+        </Button>
+        <select
+          value={currentSessionId ?? ''}
+          onChange={(e) => e.target.value && selectSession(Number(e.target.value))}
+          className="rounded border px-2 py-1 text-sm"
+        >
+          <option value="">选择会话...</option>
+          {sessions.map((s) => (
+            <option key={s.id} value={s.id}>
+              #{s.id} {s.title || '(无标题)'} - {new Date(s.updated_at).toLocaleString()}
+            </option>
+          ))}
+        </select>
+        {currentSessionId && (
+          <span className="text-xs text-muted-foreground">当前: #{currentSessionId}</span>
+        )}
+      </div>
+      <div className="flex flex-1 overflow-hidden px-2 pb-12">
       {/* 左侧：agent 聊天 */}
       <div className="flex flex-col gap-4 min-w-0" style={{ width: `${100 - rightPct}%` }}>
         <div className="relative grow">
@@ -536,44 +613,67 @@ export default function Agent() {
                   也可以直接问问题，如“查一下长鑫相关的”
                 </div>
               ) : (
-                messages.map((message, idx) => (
-                  <div
-                    key={message.id}
-                    className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} items-end gap-2`}
-                  >
-                    {message.role === 'user' && (
-                      <Button
-                        onClick={() => handleCopyMessage(message)}
-                        className="mb-2 size-6 shrink-0 rounded-md opacity-60 transition-opacity hover:opacity-100"
-                        tooltip="复制"
-                        variant="ghost"
-                        size="icon"
-                      >
-                        <CopyIcon className="size-4" />
-                      </Button>
-                    )}
-                    <ChatMessage
-                      message={message}
-                      isTabActive={isAgentTabActive}
-                      isQuerying={
-                        idx === messages.length - 1 &&
-                        message.role === 'assistant' &&
-                        loading
-                      }
-                    />
-                    {message.role === 'assistant' && (
-                      <Button
-                        onClick={() => handleCopyMessage(message)}
-                        className="mb-2 size-6 shrink-0 rounded-md opacity-60 transition-opacity hover:opacity-100"
-                        tooltip="复制"
-                        variant="ghost"
-                        size="icon"
-                      >
-                        <CopyIcon className="size-4" />
-                      </Button>
-                    )}
-                  </div>
-                ))
+                messages.map((message, idx) => {
+                  const toolCall = (message as any).toolCall
+                  if (toolCall) {
+                    return (
+                      <div key={message.id} className="flex justify-start">
+                        <div className="max-w-[80%] rounded-lg border border-border bg-muted/80 px-3 py-2 text-xs font-mono">
+                          <div className="flex items-center gap-1 font-bold text-muted-foreground">
+                            <WrenchIcon className="size-3" />
+                            {toolCall.name}
+                          </div>
+                          {toolCall.args && (
+                            <pre className="mt-1 max-h-40 overflow-auto rounded bg-background/60 p-1 text-xs">{JSON.stringify(toolCall.args, null, 2)}</pre>
+                          )}
+                          {toolCall.result === undefined ? (
+                            <div className="mt-1 animate-pulse text-muted-foreground">执行中...</div>
+                          ) : (
+                            <div className="mt-1 border-t border-border pt-1 text-muted-foreground">✓ {JSON.stringify(toolCall.result).slice(0, 200)}</div>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  }
+                  return (
+                    <div
+                      key={message.id}
+                      className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} items-end gap-2`}
+                    >
+                      {message.role === 'user' && (
+                        <Button
+                          onClick={() => handleCopyMessage(message)}
+                          className="mb-2 size-6 shrink-0 rounded-md opacity-60 transition-opacity hover:opacity-100"
+                          tooltip="复制"
+                          variant="ghost"
+                          size="icon"
+                        >
+                          <CopyIcon className="size-4" />
+                        </Button>
+                      )}
+                      <ChatMessage
+                        message={message}
+                        isTabActive={isAgentTabActive}
+                        isQuerying={
+                          idx === messages.length - 1 &&
+                          message.role === 'assistant' &&
+                          loading
+                        }
+                      />
+                      {message.role === 'assistant' && (
+                        <Button
+                          onClick={() => handleCopyMessage(message)}
+                          className="mb-2 size-6 shrink-0 rounded-md opacity-60 transition-opacity hover:opacity-100"
+                          tooltip="复制"
+                          variant="ghost"
+                          size="icon"
+                        >
+                          <CopyIcon className="size-4" />
+                        </Button>
+                      )}
+                    </div>
+                  )
+                })
               )}
               <div ref={messagesEndRef} className="pb-1" />
             </div>
@@ -711,18 +811,22 @@ export default function Agent() {
                         >
                           <CopyIcon className="size-3" />
                         </Button>
-                        {contents.length > 1 && (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => removeBox(box.key)}
-                            tooltip="删除框"
-                            className="size-6 hover:text-destructive"
-                          >
-                            <TrashIcon className="size-3" />
-                          </Button>
-                        )}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => {
+                            if (contents.length <= 1) {
+                              setContents(prev => prev.map(c => c.key === box.key ? { ...c, text: '', storedId: null } : c))
+                            } else {
+                              removeBox(box.key)
+                            }
+                          }}
+                          tooltip="删除框"
+                          className="size-6 hover:text-destructive"
+                        >
+                          <TrashIcon className="size-3" />
+                        </Button>
                       </div>
                     </div>
                     <Textarea
@@ -747,6 +851,7 @@ export default function Agent() {
             </div>
           </CardContent>
         </Card>
+      </div>
       </div>
     </div>
   )
