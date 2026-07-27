@@ -105,3 +105,62 @@ async def fetch_insight_content(id: int) -> dict | None:
             "SELECT id, content FROM shared.insight WHERE id = $1", id
         )
         return dict(row) if row else None
+
+
+# 白名单：允许批量更新的字段（content/content_ref/content_tokens 不允许改）
+UPDATE_ALLOWED_FIELDS = {
+    "source_title", "source_url", "source_type",
+    "iv_grade", "iv_desc", "domain", "title", "summary",
+}
+
+
+async def update_insight_pg(where: dict, set_fields: dict) -> dict:
+    """批量更新 shared.insight。返回 {updated: N}。
+
+    Args:
+        where: 条件（created_after/created_before YYYY-MM-DD, domain, iv_grade）
+        set_fields: 更新字段（必须在 UPDATE_ALLOWED_FIELDS 白名单内）
+    """
+    args: list = []
+    set_parts: list = []
+    for k, v in set_fields.items():
+        if k not in UPDATE_ALLOWED_FIELDS:
+            raise ValueError(f"不允许更新字段: {k}（允许: {UPDATE_ALLOWED_FIELDS}）")
+        args.append(v)
+        set_parts.append(f"{k} = ${len(args)}")
+    if not set_parts:
+        raise ValueError("没有可更新的字段")
+
+    where_parts: list = []
+    if where.get("id"):
+        args.append(where["id"])
+        where_parts.append(f"id = ${len(args)}")
+    if where.get("ids"):
+        args.append(where["ids"])
+        where_parts.append(f"id = ANY(${len(args)})")
+    if where.get("title_contains"):
+        args.append(f"%{where['title_contains']}%")
+        where_parts.append(f"title ILIKE ${len(args)}")
+    from datetime import date as _date
+    if where.get("created_after"):
+        args.append(_date.fromisoformat(where["created_after"]))
+        where_parts.append(f"created_at >= ${len(args)}")
+    if where.get("created_before"):
+        args.append(_date.fromisoformat(where["created_before"]))
+        where_parts.append(f"created_at < ${len(args)}")
+    if where.get("domain"):
+        args.append(where["domain"])
+        where_parts.append(f"domain = ${len(args)}")
+    if where.get("iv_grade"):
+        args.append(where["iv_grade"])
+        where_parts.append(f"iv_grade = ${len(args)}")
+
+    sql = f"UPDATE shared.insight SET {', '.join(set_parts)}, updated_at = now()"
+    if where_parts:
+        sql += f" WHERE {' AND '.join(where_parts)}"
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(sql, *args)
+    count = int(result.split()[-1]) if result else 0
+    return {"updated": count}

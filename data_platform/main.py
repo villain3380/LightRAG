@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from .ingest import ingest_insight
 from .search import search_insight
-from .db import fetch_insight_content
+from .db import fetch_insight_content, update_insight_pg
 
 app = FastAPI(title="data_platform", version="0.1.0")
 
@@ -53,6 +53,20 @@ async def get_content_api(insight_id: int):
     """按需读 insight 原文。"""
     row = await fetch_insight_content(insight_id)
     return row if row else {"error": "not found", "id": insight_id}
+
+
+class UpdateInsightIn(BaseModel):
+    where: dict = {}
+    set: dict = {}
+
+
+@app.put("/insight/update")
+async def update_insight_api(req: UpdateInsightIn):
+    """批量更新 insight。where 条件 + set 字段（白名单）。"""
+    try:
+        return await update_insight_pg(req.where, req.set)
+    except ValueError as e:
+        return {"error": str(e)}
 
 
 @app.get("/health")

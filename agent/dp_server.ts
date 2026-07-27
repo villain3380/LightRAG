@@ -133,6 +133,49 @@ const getContentTool = {
   },
 };
 
+/** 批量更新 insight */
+const updateInsightTool = {
+  name: "update_insight",
+  label: "更新 insight",
+  description:
+    "批量更新 insight。where 条件（created_after: YYYY-MM-DD, created_before, domain, iv_grade）+ set 字段（source_title, source_url, source_type, iv_grade, iv_desc, domain, title, summary）。" +
+    "例如：把今天入库的 insight 的 source_title 改成'大锅饭评房记'，where={created_after:'2026-07-27'}, set={source_title:'大锅饭评房记'}",
+  parameters: Type.Object({
+    where: Type.Object({
+      id: Type.Optional(Type.Number({ description: "按 id 精确匹配单个" })),
+      ids: Type.Optional(Type.Array(Type.Number(), { description: "按 id 列表匹配多个" })),
+      title_contains: Type.Optional(Type.String({ description: "标题模糊匹配（ILIKE）" })),
+      created_after: Type.Optional(Type.String({ description: "YYYY-MM-DD，查此日期之后入库的" })),
+      created_before: Type.Optional(Type.String({ description: "YYYY-MM-DD" })),
+      domain: Type.Optional(Type.String()),
+      iv_grade: Type.Optional(Type.String()),
+    }),
+    set: Type.Object({
+      source_title: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      source_url: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      source_type: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      iv_grade: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      iv_desc: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      domain: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      title: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      summary: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+    }),
+  }),
+  execute: async (_id: string, params: any) => {
+    const r = await fetch(`${DATA_PLATFORM}/insight/update`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    const result = await r.json();
+    if (!r.ok) throw new Error(`update failed: ${JSON.stringify(result)}`);
+    return {
+      content: [{ type: "text" as const, text: `更新完成：${JSON.stringify(result)}` }],
+      details: result,
+    };
+  },
+};
+
 // === system prompt ===
 const SYSTEM_PROMPT = `你是 woowoo 的中台知识库管家。
 
@@ -144,7 +187,7 @@ const SYSTEM_PROMPT = `你是 woowoo 的中台知识库管家。
 - 调用 ingest_insight(title, summary, iv_grade, domain, tags, content_id=1, source_url) 入库
   重要：ingest_insight 传 content_id（编号），不要传 content 全文。工具会自动读 content 临时框。
 
-iv_grade：用户主动给的默认 S2。
+iv_grade：用户主动给的默认 S1。
 domain：financial_market / financial_market/semiconductor / technology / policy / daily_life / other
 tags：3-7 个标签。
 
@@ -162,7 +205,7 @@ const agent = new Agent({
   initialState: {
     systemPrompt: SYSTEM_PROMPT,
     model,
-    tools: [readContentTool, ingestInsightTool, searchInsightTool, getContentTool],
+    tools: [readContentTool, ingestInsightTool, searchInsightTool, getContentTool, updateInsightTool],
   },
   streamFunction: models.streamSimple.bind(models),
 });
@@ -252,6 +295,7 @@ app.post("/api/chat", async (c) => {
   let agentText = "";
 
   return streamSSE(c, async (stream) => {
+    const toolCallInfo = new Map<string, { name: string; args: any }>();
     const unsub = agent.subscribe(async (event: any) => {
       if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
         agentText += event.assistantMessageEvent.delta;
@@ -265,15 +309,17 @@ app.post("/api/chat", async (c) => {
           );
           agentText = "";
         }
+        toolCallInfo.set(event.toolCallId, { name: event.toolName, args: event.args });
         await stream.writeSSE({ data: JSON.stringify({ type: "tool_call", id: event.toolCallId, name: event.toolName, args: event.args }) });
       } else if (event.type === "tool_execution_end") {
         const result = event.result?.details ?? event.result;
-        // 存 tool_call 消息
+        const info = toolCallInfo.get(event.toolCallId);
+        // 存 tool_call 消息（name + args 从 start 事件取，end 事件只有 result）
         await pgPool.query(
           "INSERT INTO agent_session.message(session_id, role, tool_name, tool_args, tool_result) VALUES($1, 'tool_call', $2, $3, $4)",
-          [session_id, event.toolName, JSON.stringify(event.args), JSON.stringify(result)]
+          [session_id, info?.name ?? event.toolName, JSON.stringify(info?.args), JSON.stringify(result)]
         );
-        await stream.writeSSE({ data: JSON.stringify({ type: "tool_result", id: event.toolCallId, name: event.toolName, result }) });
+        await stream.writeSSE({ data: JSON.stringify({ type: "tool_result", id: event.toolCallId, name: info?.name ?? event.toolName, result }) });
       }
     });
     try {
