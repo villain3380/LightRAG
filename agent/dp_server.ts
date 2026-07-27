@@ -26,6 +26,7 @@ process.env.DEEPSEEK_API_KEY =
   process.env.LLM_BINDING_API_KEY || process.env.DEEPSEEK_API_KEY || "";
 
 const DATA_PLATFORM = process.env.DATA_PLATFORM_URL || "http://localhost:9955";
+const LIGHTRAG_API = process.env.LIGHTRAG_API_URL || "http://localhost:9621";
 
 // === content 临时框 store（内存，编号 -> content 全文） ===
 const contentStore = new Map<number, string>();
@@ -176,6 +177,47 @@ const updateInsightTool = {
   },
 };
 
+/** 检索 lightrag 知识库（文档切片 + 知识图谱 + 向量 hybrid） */
+const ragQueryTool = {
+  name: "rag_query",
+  label: "RAG 检索",
+  description:
+    "检索 lightrag 知识库（文档切片 + 知识图谱 + 向量 hybrid）。" +
+    "mode：naive(纯向量快) / local(局部图) / global(全局图) / hybrid(图+向量) / mix(全覆盖,最全) / bypass(跳过检索)。" +
+    "简单事实用 naive，复杂关联用 hybrid/mix。" +
+    "用户可能在消息里指定参数（'用户要求用以下参数检索：...'），按指定参数调。",
+  parameters: Type.Object({
+    query: Type.String({ description: "查询文本" }),
+    mode: Type.Optional(Type.String({ description: "检索模式：naive/local/global/hybrid/mix/bypass，默认 mix" })),
+    top_k: Type.Optional(Type.Number({ description: "实体/关系检索数，默认 40" })),
+    chunk_top_k: Type.Optional(Type.Number({ description: "chunk 检索数，默认 20" })),
+    dense_weight: Type.Optional(Type.Number({ description: "dense 权重 0-1，默认 0.5" })),
+    sparse_weight: Type.Optional(Type.Number({ description: "sparse 权重 0-1，默认 0.5" })),
+  }),
+  execute: async (_id: string, params: any) => {
+    const r = await fetch(`${LIGHTRAG_API}/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: params.query,
+        mode: params.mode || "mix",
+        top_k: params.top_k,
+        chunk_top_k: params.chunk_top_k,
+        dense_weight: params.dense_weight,
+        sparse_weight: params.sparse_weight,
+        stream: false,
+        response_type: "Multiple Paragraphs",
+      }),
+    });
+    if (!r.ok) throw new Error(`rag_query failed: ${r.status} ${await r.text()}`);
+    const result = await r.json();
+    return {
+      content: [{ type: "text" as const, text: result.response || JSON.stringify(result) }],
+      details: { references: result.references },
+    };
+  },
+};
+
 // === system prompt ===
 const SYSTEM_PROMPT = `你是 woowoo 的中台知识库管家。
 
@@ -205,7 +247,7 @@ const agent = new Agent({
   initialState: {
     systemPrompt: SYSTEM_PROMPT,
     model,
-    tools: [readContentTool, ingestInsightTool, searchInsightTool, getContentTool, updateInsightTool],
+    tools: [readContentTool, ingestInsightTool, searchInsightTool, getContentTool, updateInsightTool, ragQueryTool],
   },
   streamFunction: models.streamSimple.bind(models),
 });

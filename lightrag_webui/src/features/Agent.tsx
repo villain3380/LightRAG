@@ -4,11 +4,12 @@ import Textarea from '@/components/ui/Textarea'
 import Button from '@/components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { ChatMessage, type MessageWithError } from '@/components/retrieval/ChatMessage'
+import QuerySettings from '@/components/retrieval/QuerySettings'
 import { useDebounce } from '@/hooks/useDebounce'
 import { throttle } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settings'
 import { copyToClipboard } from '@/utils/clipboard'
-import { CopyIcon, EraserIcon, PlusIcon, SendIcon, SquareIcon, TrashIcon, WrenchIcon } from 'lucide-react'
+import { CopyIcon, EraserIcon, PlusIcon, SendIcon, SquareIcon, TrashIcon, WrenchIcon, XIcon } from 'lucide-react'
 import { toast } from 'sonner'
 
 const AGENT_API = 'http://localhost:9956'
@@ -50,6 +51,8 @@ export default function Agent() {
   // 会话管理
   const [sessions, setSessions] = useState<any[]>([])
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null)
+  const [showParams, setShowParams] = useState(false)
+  const [useParams, setUseParams] = useState(false)
 
   const loadSessions = useCallback(async () => {
     try {
@@ -157,7 +160,11 @@ export default function Agent() {
       e.preventDefault()
       if (!input.trim() || loading) return
 
-      const userMsg = input
+      let userMsg = input
+      if (useParams) {
+        const qs = useSettingsStore.getState().querySettings
+        userMsg += `\n\n用户要求用以下参数检索：mode=${qs.mode}, top_k=${qs.top_k}, chunk_top_k=${qs.chunk_top_k}, dense_weight=${qs.dense_weight}, sparse_weight=${qs.sparse_weight}`
+      }
 
       const userMessage: MessageWithError = {
         id: generateUniqueId(),
@@ -596,7 +603,38 @@ export default function Agent() {
         {currentSessionId && (
           <span className="text-xs text-muted-foreground">当前: #{currentSessionId}</span>
         )}
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setShowParams(!showParams)}
+          className="ml-auto"
+        >
+          retrieval parameter
+        </Button>
       </div>
+      {showParams && (
+        <div className="fixed right-4 top-12 z-50 max-h-[80vh] w-96 overflow-auto rounded-lg border bg-background shadow-lg">
+          <div className="sticky top-0 flex items-center justify-between border-b bg-background p-2">
+            <span className="text-sm font-bold">Retrieval Parameter</span>
+            <Button variant="ghost" size="icon" onClick={() => setShowParams(false)} className="size-6">
+              <XIcon className="size-4" />
+            </Button>
+          </div>
+          <div className="p-2">
+            <label className="mb-2 flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={useParams}
+                onChange={(e) => setUseParams(e.target.checked)}
+              />
+              添加参数要求（勾选后 agent 用这些参数检索）
+            </label>
+            <div className="h-[500px]">
+              <QuerySettings />
+            </div>
+          </div>
+        </div>
+      )}
       <div className="flex flex-1 overflow-hidden px-2 pb-12">
       {/* 左侧：agent 聊天 */}
       <div className="flex flex-col gap-4 min-w-0" style={{ width: `${100 - rightPct}%` }}>
