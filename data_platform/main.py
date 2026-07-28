@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from .ingest import ingest_insight
 from .search import search_insight
 from .db import fetch_insight_content, update_insight_pg
+from .db_emfetch import em_fetch_ingest_pg
 
 app = FastAPI(title="data_platform", version="0.1.0")
 
@@ -66,6 +67,15 @@ async def update_insight_api(req: UpdateInsightIn):
     try:
         return await update_insight_pg(req.where, req.set)
     except ValueError as e:
+        return {"error": str(e)}
+
+
+@app.post("/ingest/em_fetch")
+async def ingest_em_fetch_api(data: dict):
+    """批量入库 em-fetch JSON（10 种数据类型，market_data + event_data）。"""
+    try:
+        return await em_fetch_ingest_pg(data)
+    except Exception as e:
         return {"error": str(e)}
 
 

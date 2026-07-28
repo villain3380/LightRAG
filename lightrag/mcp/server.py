@@ -62,6 +62,9 @@ API_BASE_URL = os.getenv("LIGHTRAG_API_BASE_URL", "http://127.0.0.1:9621").rstri
 API_KEY = os.getenv("LIGHTRAG_API_KEY", None)
 DEFAULT_TIMEOUT = int(os.getenv("LIGHTRAG_MCP_TIMEOUT", "120"))
 
+# data_platform service URL (for insight + em-fetch tools)
+DP_BASE_URL = os.getenv("DATA_PLATFORM_URL", "http://127.0.0.1:9955").rstrip("/")
+
 MCP_TRANSPORT = os.getenv("LIGHTRAG_MCP_TRANSPORT", "stdio")
 MCP_HOST = os.getenv("LIGHTRAG_MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.getenv("LIGHTRAG_MCP_PORT", "8720"))
@@ -677,6 +680,64 @@ async def knowledge_qa_prompt(query: str) -> str:
         "lightrag_list_docs.\n"
         "4. Synthesize your answer from the retrieved data.\n"
     )
+
+
+# ── data_platform tools (insight + em-fetch) ──────────────────────────
+
+
+@mcp.tool(
+    name="insight_search",
+    description="Search high-value insights (Milvus hybrid dense+sparse). Returns summaries (not full content).",
+)
+async def insight_search(query: str, domain: str | None = None, top_k: int = 5) -> str:
+    """Search insights by semantic query. Optional domain filter."""
+    async with httpx.AsyncClient(base_url=DP_BASE_URL, timeout=httpx.Timeout(DEFAULT_TIMEOUT)) as cli:
+        resp = await cli.post("/insight/search", json={"query": query, "domain": domain, "top_k": top_k})
+        resp.raise_for_status()
+        return json.dumps(resp.json(), ensure_ascii=False)
+
+
+@mcp.tool(
+    name="insight_ingest",
+    description="Ingest a high-value insight (PG + Milvus). Fields: title, summary, content, iv_grade(S2/S1/A/B/C/D), domain, tags, source_url.",
+)
+async def insight_ingest(
+    title: str, summary: str, content: str, iv_grade: str, domain: str,
+    tags: list[str] | None = None, source_url: str | None = None,
+) -> str:
+    """Ingest an insight. iv_grade: S2/S1/A/B/C/D. domain: financial_market/semiconductor/technology/policy/daily_life/other."""
+    async with httpx.AsyncClient(base_url=DP_BASE_URL, timeout=httpx.Timeout(DEFAULT_TIMEOUT)) as cli:
+        resp = await cli.post("/ingest/insight", json={
+            "title": title, "summary": summary, "content": content,
+            "iv_grade": iv_grade, "domain": domain, "tags": tags or [],
+            "source_url": source_url,
+        })
+        resp.raise_for_status()
+        return json.dumps(resp.json(), ensure_ascii=False)
+
+
+@mcp.tool(
+    name="insight_get_content",
+    description="Get full content of an insight by ID (for deep reading).",
+)
+async def insight_get_content(id: int) -> str:
+    """Get full content of an insight by ID."""
+    async with httpx.AsyncClient(base_url=DP_BASE_URL, timeout=httpx.Timeout(DEFAULT_TIMEOUT)) as cli:
+        resp = await cli.get(f"/insight/{id}/content")
+        resp.raise_for_status()
+        return json.dumps(resp.json(), ensure_ascii=False)
+
+
+@mcp.tool(
+    name="insight_update",
+    description="Batch update insights. where: {id/ids/title_contains/created_after/domain/iv_grade}, set: {source_title/source_url/.../null}.",
+)
+async def insight_update(where: dict, set: dict) -> str:
+    """Batch update insights. set fields support null (clear)."""
+    async with httpx.AsyncClient(base_url=DP_BASE_URL, timeout=httpx.Timeout(DEFAULT_TIMEOUT)) as cli:
+        resp = await cli.put("/insight/update", json={"where": where, "set": set})
+        resp.raise_for_status()
+        return json.dumps(resp.json(), ensure_ascii=False)
 
 
 # ── Entry Point ────────────────────────────────────────────────────────
