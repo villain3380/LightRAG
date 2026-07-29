@@ -75,10 +75,18 @@ mcp = FastMCP(
     host=MCP_HOST,
     port=MCP_PORT,
     instructions=(
-        "LightRAG knowledge base server. You can search documents, insert new "
-        "knowledge, browse document lists, explore the knowledge graph, and "
-        "query data without LLM generation. All destructive operations "
-        "(delete, clear, cancel) are intentionally excluded for safety."
+        "LightRAG knowledge base + data platform server. Tools:\n"
+        "- lightrag_search / lightrag_search_data: search documents (RAG)\n"
+        "- lightrag_insert_text: insert knowledge\n"
+        "- lightrag_list_docs / knowledge_graph: browse docs / graph\n"
+        "- insight_search: search high-value info snippets\n"
+        "- insight_ingest: ingest insight\n"
+        "- insight_get_content: get insight full content\n"
+        "- insight_update: batch update insights\n\n"
+        "When to use which search:\n"
+        "- Short, scattered, high-value info -> insight_search (market tips, trading rules, personal notes)\n"
+        "- Systematic, complex, multi-hop knowledge -> lightrag_search (industry analysis, technical docs, full reports)\n\n"
+        "All destructive operations (delete, clear, cancel) are excluded for safety."
     ),
 )
 
