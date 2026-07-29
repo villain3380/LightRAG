@@ -26,3 +26,13 @@ async def embed_summary(summary: str) -> tuple[list[float], dict[int, float]]:
     dense = result.dense[0].tolist()
     sparse = result.sparse[0] if result.sparse else {}
     return dense, sparse
+
+
+async def embed_todo(text: str) -> list[float]:
+    """todo 向量化（dense only，dim=1024）。用于 title+detail 拼接文本的语义检索。
+
+    用 with_sparse=True 复用 EmbeddingResult（有 .dense）；with_sparse=False 返回
+    ndarray（无 .dense），类型分歧，这里统一走 with_sparse=True 只取 dense。
+    """
+    result = await dashscope_embed.aembed([text], with_sparse=True)
+    return result.dense[0].tolist()

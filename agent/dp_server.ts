@@ -218,6 +218,152 @@ const ragQueryTool = {
   },
 };
 
+// === todo 工具（代理 data_platform /todo/） ===
+
+/** 新建 todo */
+const todoCreateTool = {
+  name: "todo_create",
+  label: "新建待办",
+  description: "新建一条待办事项。priority: P0/P1/P2/P3(默认P2), due_date: YYYY-MM-DD。返回 {id}。",
+  parameters: Type.Object({
+    title: Type.String({ description: "标题" }),
+    priority: Type.Optional(Type.String({ description: "P0/P1/P2/P3, 默认 P2" })),
+    detail: Type.Optional(Type.String({ description: "详细描述" })),
+    due_date: Type.Optional(Type.String({ description: "截止日期 YYYY-MM-DD" })),
+    tags: Type.Optional(Type.Array(Type.String())),
+    domain: Type.Optional(Type.String()),
+  }),
+  execute: async (_id: string, params: any) => {
+    const r = await fetch(`${DATA_PLATFORM}/todo/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    const result = await r.json();
+    if (!r.ok) throw new Error(`create todo failed: ${JSON.stringify(result)}`);
+    return {
+      content: [{ type: "text" as const, text: `已新建待办：${JSON.stringify(result)}` }],
+      details: result,
+    };
+  },
+};
+
+/** 列出 todo */
+const todoListTool = {
+  name: "todo_list",
+  label: "列出待办",
+  description: "列出待办事项(按 priority P0->P3, due_date 排序)。可按 status(todo/in_progress/done/cancelled)/priority/domain 筛选。默认返回全部状态。",
+  parameters: Type.Object({
+    status: Type.Optional(Type.String({ description: "todo/in_progress/done/cancelled" })),
+    priority: Type.Optional(Type.String()),
+    domain: Type.Optional(Type.String()),
+    limit: Type.Optional(Type.Number()),
+  }),
+  execute: async (_id: string, params: any) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v != null) qs.set(k, String(v));
+    const r = await fetch(`${DATA_PLATFORM}/todo/?${qs}`);
+    const result = await r.json();
+    if (!r.ok) throw new Error(`list todo failed: ${JSON.stringify(result)}`);
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+      details: { count: Array.isArray(result) ? result.length : 0 },
+    };
+  },
+};
+
+/** 取单条 todo */
+const todoGetTool = {
+  name: "todo_get",
+  label: "查看待办",
+  description: "按 id 取单条待办(含 detail)。",
+  parameters: Type.Object({ id: Type.Number() }),
+  execute: async (_id: string, params: any) => {
+    const r = await fetch(`${DATA_PLATFORM}/todo/${params.id}`);
+    const result = await r.json();
+    if (!r.ok) throw new Error(`get todo failed: ${JSON.stringify(result)}`);
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(result) }],
+      details: { id: params.id },
+    };
+  },
+};
+
+/** 更新 todo */
+const todoUpdateTool = {
+  name: "todo_update",
+  label: "更新待办",
+  description: "更新待办。set: {title/detail/status/priority/due_date/tags/domain/sort_order}。status='done'自动填completed_at;status='cancelled'软删除。",
+  parameters: Type.Object({
+    id: Type.Number(),
+    set: Type.Object({
+      title: Type.Optional(Type.String()),
+      detail: Type.Optional(Type.String()),
+      status: Type.Optional(Type.String({ description: "todo/in_progress/done/cancelled" })),
+      priority: Type.Optional(Type.String()),
+      due_date: Type.Optional(Type.String({ description: "YYYY-MM-DD" })),
+      tags: Type.Optional(Type.Array(Type.String())),
+      domain: Type.Optional(Type.String()),
+      sort_order: Type.Optional(Type.Number()),
+    }),
+  }),
+  execute: async (_id: string, params: any) => {
+    const r = await fetch(`${DATA_PLATFORM}/todo/${params.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ set: params.set }),
+    });
+    const result = await r.json();
+    if (!r.ok) throw new Error(`update todo failed: ${JSON.stringify(result)}`);
+    return {
+      content: [{ type: "text" as const, text: `已更新：${JSON.stringify(result)}` }],
+      details: result,
+    };
+  },
+};
+
+/** 标记完成 */
+const todoCompleteTool = {
+  name: "todo_complete",
+  label: "完成待办",
+  description: "按 id 标记待办完成(trigger 自动填 completed_at)。",
+  parameters: Type.Object({ id: Type.Number() }),
+  execute: async (_id: string, params: any) => {
+    const r = await fetch(`${DATA_PLATFORM}/todo/${params.id}/complete`, { method: "PUT" });
+    const result = await r.json();
+    if (!r.ok) throw new Error(`complete todo failed: ${JSON.stringify(result)}`);
+    return {
+      content: [{ type: "text" as const, text: `已完成：${JSON.stringify(result)}` }],
+      details: result,
+    };
+  },
+};
+
+/** 语义搜索 todo（模糊复述找待办） */
+const todoSearchTool = {
+  name: "todo_search",
+  label: "搜索待办",
+  description:
+    "语义搜索 todo（用模糊复述找某条待办）。例如用户说'我上周说的测试重排模型延迟'，用此工具找到对应 todo。返回按相似度排序的列表（含 score/created_at/status）。参数：query, top_k(默认5)",
+  parameters: Type.Object({
+    query: Type.String({ description: "查询文本（用户的复述）" }),
+    top_k: Type.Optional(Type.Number()),
+  }),
+  execute: async (_id: string, params: any) => {
+    const r = await fetch(`${DATA_PLATFORM}/todo/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: params.query, top_k: params.top_k ?? 5 }),
+    });
+    const result = await r.json();
+    if (!r.ok) throw new Error(`search todo failed: ${JSON.stringify(result)}`);
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+      details: { count: Array.isArray(result) ? result.length : 0 },
+    };
+  },
+};
+
 // === system prompt ===
 const SYSTEM_PROMPT = `你是 woowoo 的中台知识库管家。
 
@@ -235,7 +381,14 @@ tags：3-7 个标签。
 
 如果用户问问题（不是入库），用 search_insight 检索；要细节用 get_insight_content。
 
-关键：ingest_insight 的 content_id 参数传编号，绝对不要传 content 全文。read_content 用来读 content 生成 summary。`;
+关键：ingest_insight 的 content_id 参数传编号，绝对不要传 content 全文。read_content 用来读 content 生成 summary。
+
+待办事项（todo）：
+- 用户说"记一下/提醒我/待办"时，用 todo_create(title, priority, due_date, detail) 新建。priority 默认 P2，紧急用 P0/P1。
+- 用户问"我有什么待办/没完成的"时，用 todo_list(status='todo') 列出未完成。
+- 用户说"完成了/做完了第N条"时，用 todo_complete(id) 标记完成。
+- 改待办内容/优先级/截止日用 todo_update(id, set)。
+- 用户用模糊复述找某条待办时（如"我上周说的测试重排模型延迟完成了"），先用 todo_search(query) 找到对应 todo，看 created_at/status 确认是哪条，再 todo_complete 或 todo_update。`;
 
 // === 建 Agent（单 Agent，多轮对话状态共享，先单用户） ===
 const models = createModels();
@@ -247,7 +400,7 @@ const agent = new Agent({
   initialState: {
     systemPrompt: SYSTEM_PROMPT,
     model,
-    tools: [readContentTool, ingestInsightTool, searchInsightTool, getContentTool, updateInsightTool, ragQueryTool],
+    tools: [readContentTool, ingestInsightTool, searchInsightTool, getContentTool, updateInsightTool, ragQueryTool, todoCreateTool, todoListTool, todoGetTool, todoUpdateTool, todoCompleteTool, todoSearchTool],
   },
   streamFunction: models.streamSimple.bind(models),
 });

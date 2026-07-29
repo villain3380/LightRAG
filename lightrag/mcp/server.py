@@ -82,7 +82,9 @@ mcp = FastMCP(
         "- insight_search: search high-value info snippets\n"
         "- insight_ingest: ingest insight\n"
         "- insight_get_content: get insight full content\n"
-        "- insight_update: batch update insights\n\n"
+        "- insight_update: batch update insights\n"
+        "- todo_create / todo_list / todo_get / todo_update / todo_complete: manage todo items\n"
+        "- todo_search: find a todo by fuzzy paraphrase (semantic search title+detail)\n\n"
         "When to use which search:\n"
         "- Short, scattered, high-value info -> insight_search (market tips, trading rules, personal notes)\n"
         "- Systematic, complex, multi-hop knowledge -> lightrag_search (industry analysis, technical docs, full reports)\n\n"
@@ -744,6 +746,98 @@ async def insight_update(where: dict, set: dict) -> str:
     """Batch update insights. set fields support null (clear)."""
     async with httpx.AsyncClient(base_url=DP_BASE_URL, timeout=httpx.Timeout(DEFAULT_TIMEOUT)) as cli:
         resp = await cli.put("/insight/update", json={"where": where, "set": set})
+        resp.raise_for_status()
+        return json.dumps(resp.json(), ensure_ascii=False)
+
+
+# ── data_platform tools (todo) ─────────────────────────────────────────
+
+
+@mcp.tool(
+    name="todo_create",
+    description="Create a todo item. priority: P0/P1/P2/P3 (default P2). due_date: YYYY-MM-DD. Returns {id}.",
+)
+async def todo_create(
+    title: str,
+    priority: str = "P2",
+    detail: str | None = None,
+    due_date: str | None = None,
+    tags: list[str] | None = None,
+    domain: str | None = None,
+) -> str:
+    """Create a todo. New todos always start as status='todo'."""
+    async with httpx.AsyncClient(base_url=DP_BASE_URL, timeout=httpx.Timeout(DEFAULT_TIMEOUT)) as cli:
+        resp = await cli.post("/todo/", json={
+            "title": title, "priority": priority, "detail": detail,
+            "due_date": due_date, "tags": tags or [], "domain": domain,
+        })
+        resp.raise_for_status()
+        return json.dumps(resp.json(), ensure_ascii=False)
+
+
+@mcp.tool(
+    name="todo_list",
+    description="List todo items ordered by priority (P0->P3) then due_date. Filter by status(todo/in_progress/done/cancelled)/priority/domain.",
+)
+async def todo_list(
+    status: str | None = None,
+    priority: str | None = None,
+    domain: str | None = None,
+    limit: int = 50,
+) -> str:
+    """List todos. Default returns all statuses. Pass status='todo' for pending only."""
+    async with httpx.AsyncClient(base_url=DP_BASE_URL, timeout=httpx.Timeout(DEFAULT_TIMEOUT)) as cli:
+        resp = await cli.get("/todo/", params={
+            "status": status, "priority": priority, "domain": domain, "limit": limit,
+        })
+        resp.raise_for_status()
+        return json.dumps(resp.json(), ensure_ascii=False)
+
+
+@mcp.tool(
+    name="todo_get",
+    description="Get a single todo item by ID (full detail).",
+)
+async def todo_get(id: int) -> str:
+    """Get a todo by ID."""
+    async with httpx.AsyncClient(base_url=DP_BASE_URL, timeout=httpx.Timeout(DEFAULT_TIMEOUT)) as cli:
+        resp = await cli.get(f"/todo/{id}")
+        resp.raise_for_status()
+        return json.dumps(resp.json(), ensure_ascii=False)
+
+
+@mcp.tool(
+    name="todo_update",
+    description="Update a todo. set: {title/detail/status/priority/due_date/tags/domain/sort_order}. status='done' auto-fills completed_at; status='cancelled' = soft-delete (no hard delete).",
+)
+async def todo_update(id: int, set: dict) -> str:
+    """Update a todo. Changing status to 'done' auto-fills completed_at (via trigger)."""
+    async with httpx.AsyncClient(base_url=DP_BASE_URL, timeout=httpx.Timeout(DEFAULT_TIMEOUT)) as cli:
+        resp = await cli.put(f"/todo/{id}", json={"set": set})
+        resp.raise_for_status()
+        return json.dumps(resp.json(), ensure_ascii=False)
+
+
+@mcp.tool(
+    name="todo_complete",
+    description="Mark a todo as done (convenience). Auto-fills completed_at via trigger.",
+)
+async def todo_complete(id: int) -> str:
+    """Mark a todo done. completed_at is auto-filled by the DB trigger."""
+    async with httpx.AsyncClient(base_url=DP_BASE_URL, timeout=httpx.Timeout(DEFAULT_TIMEOUT)) as cli:
+        resp = await cli.put(f"/todo/{id}/complete")
+        resp.raise_for_status()
+        return json.dumps(resp.json(), ensure_ascii=False)
+
+
+@mcp.tool(
+    name="todo_search",
+    description="Semantic search todos by fuzzy paraphrase (e.g. 'the rerank model latency test I mentioned'). Returns ranked list with score/created_at/status. Use before todo_complete when user references a prior todo vaguely.",
+)
+async def todo_search(query: str, top_k: int = 5) -> str:
+    """Find todos by semantic similarity to the query (matches title+detail)."""
+    async with httpx.AsyncClient(base_url=DP_BASE_URL, timeout=httpx.Timeout(DEFAULT_TIMEOUT)) as cli:
+        resp = await cli.post("/todo/search", json={"query": query, "top_k": top_k})
         resp.raise_for_status()
         return json.dumps(resp.json(), ensure_ascii=False)
 
