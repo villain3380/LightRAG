@@ -105,6 +105,21 @@ _ALL_STRATEGY_KEYS = {
             },
         },
         {
+            # nan bypasses ``amt <= 0`` / ``amt > 100``; reject before chunker.
+            "strategy": "semantic_vector",
+            "params": {
+                "breakpoint_threshold_type": "percentile",
+                "breakpoint_threshold_amount": float("nan"),
+            },
+        },
+        {
+            "strategy": "semantic_vector",
+            "params": {
+                "breakpoint_threshold_type": "percentile",
+                "breakpoint_threshold_amount": float("inf"),
+            },
+        },
+        {
             # malformed regex must be compiled/rejected at parse time
             "strategy": "semantic_vector",
             "params": {"sentence_split_regex": "("},
@@ -459,7 +474,15 @@ def _make_client(monkeypatch, addon_params=None):
     """
     captured: dict = {}
 
-    async def _spy(rag, texts, file_sources=None, track_id=None, chunking=None, skip_kg=None):
+    async def _spy(
+        rag,
+        texts,
+        file_sources=None,
+        track_id=None,
+        chunking=None,
+        skip_kg=None,
+        admission_token=None,
+    ):
         captured["texts"] = texts
         captured["file_sources"] = file_sources
         captured["chunking"] = chunking
@@ -556,6 +579,34 @@ def test_insert_text_returns_422_on_malformed_chunking_without_scheduling(monkey
     assert resp.status_code == 422
     # Body validation fails before the endpoint body runs: no background
     # indexing is scheduled, so the spy never fires.
+    assert captured == {}
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_insert_text_returns_422_on_nonfinite_breakpoint_amount(monkeypatch, bad):
+    """Non-finite amounts must 422 on the HTTP path, not 500 via JSONResponse."""
+    import json
+
+    client, captured = _make_client(monkeypatch)
+    payload = {
+        "text": "hello",
+        "file_source": "a.md",
+        "chunking": {
+            "strategy": "semantic_vector",
+            "params": {
+                "breakpoint_threshold_type": "percentile",
+                "breakpoint_threshold_amount": bad,
+            },
+        },
+    }
+    resp = client.post(
+        "/documents/text",
+        headers={**_HEADERS, "Content-Type": "application/json"},
+        content=json.dumps(payload, allow_nan=True),
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert "detail" in body
     assert captured == {}
 
 

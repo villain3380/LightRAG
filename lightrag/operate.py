@@ -18,7 +18,6 @@ from lightrag.utils import (
     logger,
     compute_mdhash_id,
     Tokenizer,
-    is_float_regex,
     sanitize_and_normalize_extracted_text,
     sanitize_text_for_encoding,
     repair_vlm_json_escape_damage_nested,
@@ -88,7 +87,11 @@ from lightrag.constants import (
     DEFAULT_ENTITY_NAME_MAX_LENGTH,
     DEFAULT_ENTITY_NAME_MAX_BYTES,
 )
-from lightrag.kg.shared_storage import PipelineStatusLogger, get_storage_keyed_lock
+from lightrag.kg.shared_storage import (
+    PipelineStatusLogger,
+    append_pipeline_history,
+    get_storage_keyed_lock,
+)
 import time
 from dotenv import load_dotenv
 
@@ -729,11 +732,8 @@ def _handle_single_relationship_extraction(
             return None
 
         edge_source_id = chunk_key
-        weight = (
-            float(record_attributes[-1].strip('"').strip("'"))
-            if is_float_regex(record_attributes[-1].strip('"').strip("'"))
-            else 1.0
-        )
+        # Prompt text rows are 5 fields with no weight; keep default 1.0.
+        weight = 1.0
 
         return dict(
             src_id=source,
@@ -1056,7 +1056,7 @@ async def rebuild_knowledge_from_chunks(
     if pipeline_status is not None and pipeline_status_lock is not None:
         async with pipeline_status_lock:
             pipeline_status["latest_message"] = status_message
-            pipeline_status["history_messages"].append(status_message)
+            append_pipeline_history(pipeline_status, status_message)
 
     # Get cached extraction results for these chunks using storage
     # cached_results： chunk_id -> [list of (extraction_result, create_time) from LLM cache sorted by create_time of the first extraction_result]
@@ -1078,7 +1078,7 @@ async def rebuild_knowledge_from_chunks(
         if pipeline_status is not None and pipeline_status_lock is not None:
             async with pipeline_status_lock:
                 pipeline_status["latest_message"] = status_message
-                pipeline_status["history_messages"].append(status_message)
+                append_pipeline_history(pipeline_status, status_message)
 
     if not cached_results:
         status_message = "No cached extraction results found"
@@ -1086,7 +1086,7 @@ async def rebuild_knowledge_from_chunks(
         if pipeline_status is not None and pipeline_status_lock is not None:
             async with pipeline_status_lock:
                 pipeline_status["latest_message"] = status_message
-                pipeline_status["history_messages"].append(status_message)
+                append_pipeline_history(pipeline_status, status_message)
         if rebuild_policy == "best_effort":
             return report
 
@@ -1271,7 +1271,7 @@ async def rebuild_knowledge_from_chunks(
     if pipeline_status is not None and pipeline_status_lock is not None:
         async with pipeline_status_lock:
             pipeline_status["latest_message"] = status_message
-            pipeline_status["history_messages"].append(status_message)
+            append_pipeline_history(pipeline_status, status_message)
 
     # Execute all tasks in parallel with semaphore control; on any failure
     # every sibling is cancelled and drained before the first exception
@@ -1287,7 +1287,7 @@ async def rebuild_knowledge_from_chunks(
     if pipeline_status is not None and pipeline_status_lock is not None:
         async with pipeline_status_lock:
             pipeline_status["latest_message"] = status_message
-            pipeline_status["history_messages"].append(status_message)
+            append_pipeline_history(pipeline_status, status_message)
 
     if report.has_warnings:
         logger.warning(
@@ -3301,7 +3301,7 @@ async def merge_nodes_and_edges(
     logger.info(log_message)
     async with pipeline_status_lock:
         pipeline_status["latest_message"] = log_message
-        pipeline_status["history_messages"].append(log_message)
+        append_pipeline_history(pipeline_status, log_message)
 
     # ===== Phase 0: write-ahead recovery indexes (issue #3400) =====
     # Persist the candidate superset BEFORE any graph/vector/tracking
@@ -3321,7 +3321,7 @@ async def merge_nodes_and_edges(
         logger.info(log_message)
         async with pipeline_status_lock:
             pipeline_status["latest_message"] = log_message
-            pipeline_status["history_messages"].append(log_message)
+            append_pipeline_history(pipeline_status, log_message)
 
         await full_entities_storage.upsert(
             {
@@ -3362,7 +3362,7 @@ async def merge_nodes_and_edges(
     logger.info(log_message)
     async with pipeline_status_lock:
         pipeline_status["latest_message"] = log_message
-        pipeline_status["history_messages"].append(log_message)
+        append_pipeline_history(pipeline_status, log_message)
 
     async def _locked_process_entity_name(entity_name, entities):
         async with semaphore:
@@ -3408,7 +3408,7 @@ async def merge_nodes_and_edges(
                         ):
                             async with pipeline_status_lock:
                                 pipeline_status["latest_message"] = error_msg
-                                pipeline_status["history_messages"].append(error_msg)
+                                append_pipeline_history(pipeline_status, error_msg)
                     except Exception as status_error:
                         logger.error(
                             f"Failed to update pipeline status: {status_error}"
@@ -3442,7 +3442,7 @@ async def merge_nodes_and_edges(
     logger.info(log_message)
     async with pipeline_status_lock:
         pipeline_status["latest_message"] = log_message
-        pipeline_status["history_messages"].append(log_message)
+        append_pipeline_history(pipeline_status, log_message)
 
     async def _locked_process_edges(edge_key, edges):
         async with semaphore:
@@ -3501,7 +3501,7 @@ async def merge_nodes_and_edges(
                         ):
                             async with pipeline_status_lock:
                                 pipeline_status["latest_message"] = error_msg
-                                pipeline_status["history_messages"].append(error_msg)
+                                append_pipeline_history(pipeline_status, error_msg)
                     except Exception as status_error:
                         logger.error(
                             f"Failed to update pipeline status: {status_error}"
@@ -3554,7 +3554,7 @@ async def merge_nodes_and_edges(
     logger.info(log_message)
     async with pipeline_status_lock:
         pipeline_status["latest_message"] = log_message
-        pipeline_status["history_messages"].append(log_message)
+        append_pipeline_history(pipeline_status, log_message)
 
 
 async def extract_entities(
@@ -4665,154 +4665,155 @@ async def _get_vector_context(
         query_embedding: Optional pre-computed query embedding.
         trace: Optional mutable dict to collect per-path rankings.
     """
-    try:
-        search_top_k = query_param.chunk_top_k or query_param.top_k
-        cosine_threshold = chunks_vdb.cosine_better_than_threshold
-        sparse_enabled = getattr(chunks_vdb, "sparse_enabled", False)
+    # No broad try/except here -- mirrors _get_node_data/_get_edge_data, whose
+    # entities_vdb/relationships_vdb queries are also left to propagate. A
+    # backend query failure is not "zero relevant chunks": swallowing it here
+    # let a transient vector-store error surface as a confident "no results"
+    # answer instead of a retrieval failure (and, in mix mode, silently
+    # dropped the vector-search branch while KG results kept flowing).
+    search_top_k = query_param.chunk_top_k or query_param.top_k
+    cosine_threshold = chunks_vdb.cosine_better_than_threshold
+    sparse_enabled = getattr(chunks_vdb, "sparse_enabled", False)
 
-        if sparse_enabled:
-            results = await chunks_vdb.query_hybrid(
-                query,
-                top_k=search_top_k,
-                query_embedding=query_embedding,
-                dense_weight=query_param.dense_weight,
-                sparse_weight=query_param.sparse_weight,
-            )
-        else:
-            results = await chunks_vdb.query(
-                query, top_k=search_top_k, query_embedding=query_embedding
-            )
+    if sparse_enabled:
+        results = await chunks_vdb.query_hybrid(
+            query,
+            top_k=search_top_k,
+            query_embedding=query_embedding,
+            dense_weight=query_param.dense_weight,
+            sparse_weight=query_param.sparse_weight,
+        )
+    else:
+        results = await chunks_vdb.query(
+            query, top_k=search_top_k, query_embedding=query_embedding
+        )
 
-        # ── trace: record dense ranking (always, zero extra cost) ──
-        if trace is not None:
-            # Reuse the already-fetched results for dense ranking
-            def _rank_results(raw: list, max_k: int) -> list[dict]:
-                out: list[dict] = []
-                for i, r in enumerate(raw):
-                    cid = r.get("id") or r.get("chunk_id", "")
-                    if not cid:
-                        continue
-                    out.append({
-                        "rank": i + 1,
-                        "chunk_id": cid,
-                        "file_path": r.get("file_path", ""),
-                        "distance": r.get("distance"),
-                        "content_preview": (r.get("content") or "")[:120],
-                    })
-                return out[:max_k]
-
-            trace.setdefault("paths", {})["dense_ranking"] = _rank_results(
-                results, search_top_k
-            )
-
-            # Write dense hits to chunk_tracking (even when sparse is off)
-            if chunk_tracking is not None:
-                for i, r in enumerate(results):
-                    cid = r.get("id") or r.get("chunk_id", "")
-                    if cid:
-                        if cid not in chunk_tracking:
-                            chunk_tracking[cid] = {
-                                "sources": {}, "frequencies": {}, "orders": {}
-                            }
-                        chunk_tracking[cid]["sources"]["dense"] = True
-                        chunk_tracking[cid]["frequencies"]["dense"] = 1
-                        chunk_tracking[cid]["orders"]["dense"] = i + 1
-
-        # ── trace: sparse-enabled extra paths (A/B separate, fused) ──
-        if trace is not None and sparse_enabled:
-            # Pre-compute dense+sparse vectors once; reuse for all three searches.
-            emb_res = await chunks_vdb.embedding_func.aembed(
-                [query], context="query", with_sparse=True
-            )
-            dvec = emb_res.dense[0].tolist()
-            svec: dict[int, float] = emb_res.sparse[0] if emb_res.sparse else {}
-
-            # A-path: pure dense
-            dense_raw = await chunks_vdb.query(
-                query, top_k=search_top_k, query_embedding=dvec
-            )
-            # B-path: pure sparse
-            sparse_raw = await chunks_vdb._pure_sparse_search(svec, search_top_k)
-
-            def _rank_path(raw: list, max_k: int) -> list[dict]:
-                out: list[dict] = []
-                for i, r in enumerate(raw):
-                    cid = r.get("id") or r.get("chunk_id", "")
-                    if not cid:
-                        continue
-                    out.append({
-                        "rank": i + 1,
-                        "chunk_id": cid,
-                        "file_path": r.get("file_path", ""),
-                        "distance": r.get("distance"),
-                        "content_preview": (r.get("content") or "")[:120],
-                    })
-                return out[:max_k]
-
-            trace.setdefault("paths", {})["dense_ranking"] = _rank_path(
-                dense_raw, search_top_k
-            )
-            trace.setdefault("paths", {})["sparse_ranking"] = _rank_path(
-                sparse_raw, search_top_k
-            )
-
-            # Cross-reference: for each fused result, find its A/B-path ranks.
-            dense_rmap = {r["id"]: i + 1 for i, r in enumerate(dense_raw) if r.get("id")}
-            sparse_rmap = {r["id"]: i + 1 for i, r in enumerate(sparse_raw) if r.get("id")}
-            fused: list[dict] = []
-            for r in results:
-                cid = r.get("id", "")
-                fused.append({
-                    "rank": len(fused) + 1,
+    # ── trace: record dense ranking (always, zero extra cost) ──
+    if trace is not None:
+        # Reuse the already-fetched results for dense ranking
+        def _rank_results(raw: list, max_k: int) -> list[dict]:
+            out: list[dict] = []
+            for i, r in enumerate(raw):
+                cid = r.get("id") or r.get("chunk_id", "")
+                if not cid:
+                    continue
+                out.append({
+                    "rank": i + 1,
                     "chunk_id": cid,
                     "file_path": r.get("file_path", ""),
-                    "dense_rank": dense_rmap.get(cid),
-                    "sparse_rank": sparse_rmap.get(cid),
                     "distance": r.get("distance"),
                     "content_preview": (r.get("content") or "")[:120],
                 })
-            trace.setdefault("paths", {})["fused_ranking"] = fused
+            return out[:max_k]
 
-            # Write sparse-path hits to chunk_tracking (dense path is handled
-            # by the caller via the vector_chunks loop in _perform_kg_search).
-            if chunk_tracking is not None:
-                for i, r in enumerate(sparse_raw):
-                    cid = r.get("id") or r.get("chunk_id", "")
-                    if cid:
-                        if cid not in chunk_tracking:
-                            chunk_tracking[cid] = {
-                                "sources": {}, "frequencies": {}, "orders": {}
-                            }
-                        chunk_tracking[cid]["sources"]["sparse"] = True
-                        chunk_tracking[cid]["frequencies"]["sparse"] = 1
-                        chunk_tracking[cid]["orders"]["sparse"] = i + 1
-
-        if not results:
-            logger.info(
-                f"Naive query: 0 chunks (chunk_top_k:{search_top_k} cosine:{cosine_threshold})"
-            )
-            return []
-
-        valid_chunks = []
-        for result in results:
-            if "content" in result:
-                chunk_with_metadata = {
-                    "content": result["content"],
-                    "created_at": result.get("created_at", None),
-                    "file_path": result.get("file_path", "unknown_source"),
-                    "source_type": "vector",  # Mark the source type
-                    "chunk_id": result.get("id"),  # Add chunk_id for deduplication
-                }
-                valid_chunks.append(chunk_with_metadata)
-
-        logger.info(
-            f"Naive query: {len(valid_chunks)} chunks (chunk_top_k:{search_top_k} cosine:{cosine_threshold})"
+        trace.setdefault("paths", {})["dense_ranking"] = _rank_results(
+            results, search_top_k
         )
-        return valid_chunks
 
-    except Exception as e:
-        logger.error(f"Error in _get_vector_context: {e}")
+        # Write dense hits to chunk_tracking (even when sparse is off)
+        if chunk_tracking is not None:
+            for i, r in enumerate(results):
+                cid = r.get("id") or r.get("chunk_id", "")
+                if cid:
+                    if cid not in chunk_tracking:
+                        chunk_tracking[cid] = {
+                            "sources": {}, "frequencies": {}, "orders": {}
+                        }
+                    chunk_tracking[cid]["sources"]["dense"] = True
+                    chunk_tracking[cid]["frequencies"]["dense"] = 1
+                    chunk_tracking[cid]["orders"]["dense"] = i + 1
+
+    # ── trace: sparse-enabled extra paths (A/B separate, fused) ──
+    if trace is not None and sparse_enabled:
+        # Pre-compute dense+sparse vectors once; reuse for all three searches.
+        emb_res = await chunks_vdb.embedding_func.aembed(
+            [query], context="query", with_sparse=True
+        )
+        dvec = emb_res.dense[0].tolist()
+        svec: dict[int, float] = emb_res.sparse[0] if emb_res.sparse else {}
+
+        # A-path: pure dense
+        dense_raw = await chunks_vdb.query(
+            query, top_k=search_top_k, query_embedding=dvec
+        )
+        # B-path: pure sparse
+        sparse_raw = await chunks_vdb._pure_sparse_search(svec, search_top_k)
+
+        def _rank_path(raw: list, max_k: int) -> list[dict]:
+            out: list[dict] = []
+            for i, r in enumerate(raw):
+                cid = r.get("id") or r.get("chunk_id", "")
+                if not cid:
+                    continue
+                out.append({
+                    "rank": i + 1,
+                    "chunk_id": cid,
+                    "file_path": r.get("file_path", ""),
+                    "distance": r.get("distance"),
+                    "content_preview": (r.get("content") or "")[:120],
+                })
+            return out[:max_k]
+
+        trace.setdefault("paths", {})["dense_ranking"] = _rank_path(
+            dense_raw, search_top_k
+        )
+        trace.setdefault("paths", {})["sparse_ranking"] = _rank_path(
+            sparse_raw, search_top_k
+        )
+
+        # Cross-reference: for each fused result, find its A/B-path ranks.
+        dense_rmap = {r["id"]: i + 1 for i, r in enumerate(dense_raw) if r.get("id")}
+        sparse_rmap = {r["id"]: i + 1 for i, r in enumerate(sparse_raw) if r.get("id")}
+        fused: list[dict] = []
+        for r in results:
+            cid = r.get("id", "")
+            fused.append({
+                "rank": len(fused) + 1,
+                "chunk_id": cid,
+                "file_path": r.get("file_path", ""),
+                "dense_rank": dense_rmap.get(cid),
+                "sparse_rank": sparse_rmap.get(cid),
+                "distance": r.get("distance"),
+                "content_preview": (r.get("content") or "")[:120],
+            })
+        trace.setdefault("paths", {})["fused_ranking"] = fused
+
+        # Write sparse-path hits to chunk_tracking (dense path is handled
+        # by the caller via the vector_chunks loop in _perform_kg_search).
+        if chunk_tracking is not None:
+            for i, r in enumerate(sparse_raw):
+                cid = r.get("id") or r.get("chunk_id", "")
+                if cid:
+                    if cid not in chunk_tracking:
+                        chunk_tracking[cid] = {
+                            "sources": {}, "frequencies": {}, "orders": {}
+                        }
+                    chunk_tracking[cid]["sources"]["sparse"] = True
+                    chunk_tracking[cid]["frequencies"]["sparse"] = 1
+                    chunk_tracking[cid]["orders"]["sparse"] = i + 1
+
+    if not results:
+        logger.info(
+            f"Naive query: 0 chunks (chunk_top_k:{search_top_k} cosine:{cosine_threshold})"
+        )
         return []
+
+    valid_chunks = []
+    for result in results:
+        if "content" in result:
+            chunk_with_metadata = {
+                "content": result["content"],
+                "created_at": result.get("created_at", None),
+                "file_path": result.get("file_path", "unknown_source"),
+                "source_type": "vector",  # Mark the source type
+                "chunk_id": result.get("id"),  # Add chunk_id for deduplication
+            }
+            valid_chunks.append(chunk_with_metadata)
+
+    logger.info(
+        f"Naive query: {len(valid_chunks)} chunks (chunk_top_k:{search_top_k} cosine:{cosine_threshold})"
+    )
+    return valid_chunks
 
 
 async def _perform_kg_search(
