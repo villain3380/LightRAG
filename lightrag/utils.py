@@ -4913,11 +4913,14 @@ async def apply_rerank_if_enabled(
             )
             document_texts.append(content)
 
-        # Call the new rerank function that returns index-based results
+        # Request ALL scores (top_n = doc count) so the trace can record every
+        # chunk's rerank_score + post-rerank rank. Rerank scores every doc
+        # regardless of top_n; this only enlarges the response, not the scoring
+        # work. The desired top_n is re-applied by slicing reranked_docs below.
         rerank_results = await rerank_func(
             query=query,
             documents=document_texts,
-            top_n=top_n,
+            top_n=len(document_texts),
         )
 
         # Process rerank results based on return format
@@ -4939,6 +4942,14 @@ async def apply_rerank_if_enabled(
                 logger.info(
                     f"Successfully reranked: {len(reranked_docs)} chunks from {len(retrieved_docs)} original chunks"
                 )
+                # Record ALL chunks' rerank_score + post_rerank_rank (score desc,
+                # 1 = top) before top_n slicing, so dropped chunks keep rank/score.
+                _qt = get_active_query_tracker()
+                if _qt:
+                    _qt.record_post_rerank_chunks(reranked_docs)
+                # Slice to the requested top_n (the param, not the all-scores request)
+                if top_n:
+                    reranked_docs = reranked_docs[:top_n]
                 return reranked_docs
             else:
                 # Legacy format: assume it's already reranked documents
@@ -4980,6 +4991,13 @@ async def process_chunks_unified(
         return []
 
     origin_count = len(unique_chunks)
+
+    # Record pre-rerank chunk set (sources + per-path ranks + position) for trace.
+    # unique_chunks carry _tracking (KG: from _merge_all_chunks; naive: attached
+    # in naive_query). in_final_context is marked later at the call site.
+    _qt_pre = get_active_query_tracker()
+    if _qt_pre:
+        _qt_pre.record_pre_rerank_chunks(unique_chunks)
 
     # 1. Apply reranking if enabled and query is provided
     if query_param.enable_rerank and query and unique_chunks:

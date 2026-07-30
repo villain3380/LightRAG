@@ -13,7 +13,6 @@ from .search import search_insight
 from .db import fetch_insight_content, update_insight_pg
 from .db_emfetch import em_fetch_ingest_pg
 from .db_todo import insert_todo_pg, list_todo_pg, get_todo_pg, update_todo_pg, todo_search_pg
-from .db_query_trace import insert_query_trace_pg, list_query_trace_pg, get_query_trace_pg, list_by_turn_pg
 
 app = FastAPI(title="data_platform", version="0.1.0")
 
@@ -152,47 +151,6 @@ class TodoSearchIn(BaseModel):
 async def search_todo_api(req: TodoSearchIn):
     """语义搜索 todo（用模糊复述找某条待办，按相似度返回）。"""
     return await todo_search_pg(req.query, req.top_k)
-
-
-# ===== query_trace（检索路径追踪，lightrag /query 完成后上报） =====
-
-
-@app.post("/query_trace/")
-async def create_query_trace_api(payload: dict):
-    """接收 lightrag 上报的一次 /query 追踪记录，落 shared.query_trace。
-
-    一次用户消息(agent turn)可能上报 N 行（多路并行/串行 /query 调用），用 turn_id 归组。
-    """
-    try:
-        tid = await insert_query_trace_pg(payload)
-        return {"id": tid}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/query_trace/")
-async def list_query_trace_api(
-    turn_id: str | None = None,
-    source: str | None = None,
-    mode: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
-):
-    """列表查询 query_trace（按 created_at DESC）。可按 turn_id/source/mode 筛选。"""
-    return await list_query_trace_pg(turn_id, source, mode, limit, offset)
-
-
-@app.get("/query_trace/turn/{turn_id}")
-async def list_turn_query_trace_api(turn_id: str):
-    """取一次 turn 的全部 /query 调用（按 call_index 排序，看多路并行/串行）。"""
-    return await list_by_turn_pg(turn_id)
-
-
-@app.get("/query_trace/{trace_id}")
-async def get_query_trace_api(trace_id: int):
-    """取单条 query_trace（全字段）。"""
-    row = await get_query_trace_pg(trace_id)
-    return row if row else {"error": "not found", "id": trace_id}
 
 
 @app.get("/health")

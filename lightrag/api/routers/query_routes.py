@@ -356,8 +356,7 @@ async def _enrich_references(
     return enriched
 
 
-# ── query-trace shipping (fire-and-forget to data_platform) ──
-_dp_base_url = os.getenv("DATA_PLATFORM_URL", "http://127.0.0.1:9955").rstrip("/")
+# ── query-trace shipping (fire-and-forget, direct PG write to public.*) ──
 _query_trace_enabled = os.getenv("QUERY_TRACE_ENABLED", "true").lower() == "true"
 _pending_trace_tasks: set = set()
 
@@ -397,26 +396,27 @@ def _make_tracker(
 
 
 def _ship_query_trace(tracker: QueryTraceTracker) -> None:
-    """Fire-and-forget POST the trace record to data_platform.
+    """Fire-and-forget write the trace + chunks to public.query_trace(_chunk).
 
-    Never blocks the query response and never raises. Best-effort: if
-    data_platform is unreachable the trace is dropped (logged at warning).
-    The task is tracked in ``_pending_trace_tasks`` to prevent GC.
+    Never blocks the query response and never raises. Best-effort: on PG
+    failure the trace is dropped (logged at warning). The task is tracked in
+    ``_pending_trace_tasks`` to prevent GC.
     """
     if not _query_trace_enabled:
         return
     payload = tracker.to_ship_dict()
+    chunks = tracker.to_chunk_ship_list()
 
-    async def _post() -> None:
+    async def _write() -> None:
         try:
-            import httpx
-            async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as cli:
-                await cli.post(f"{_dp_base_url}/query_trace/", json=payload)
+            from lightrag.api.query_trace_store import insert_trace
+
+            await insert_trace(payload, chunks)
         except Exception as e:
             logger.warning(f"failed to ship query_trace {tracker.trace_id}: {e}")
 
     try:
-        task = asyncio.create_task(_post())
+        task = asyncio.create_task(_write())
         _pending_trace_tasks.add(task)
         task.add_done_callback(_pending_trace_tasks.discard)
     except RuntimeError:

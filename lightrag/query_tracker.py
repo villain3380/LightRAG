@@ -35,6 +35,7 @@ import contextvars
 import logging
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,37 @@ def deactivate_query_tracker(token: contextvars.Token) -> None:
         _current_tracker.reset(token)
     except (LookupError, ValueError):
         pass
+
+
+# ---------------------------------------------------------------------------
+# Tracker
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Chunk record (per-chunk retrieval detail, shipped to query_trace_chunk)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ChunkTraceRecord:
+    """One chunk's retrieval metadata for bad-case traceability.
+
+    No content - only identity + retrieval metadata. Content is fetched
+    on-demand from the lightrag text_chunks store by chunk_id.
+    """
+
+    chunk_id: str
+    file_path: str = ""
+    sources: list[str] = field(default_factory=list)  # dense/sparse/entity/relation
+    dense_rank: int | None = None
+    sparse_rank: int | None = None
+    entity_rank: int | None = None
+    relation_rank: int | None = None
+    pre_rerank_position: int | None = None
+    post_rerank_rank: int | None = None
+    rerank_score: float | None = None
+    in_final_context: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +171,7 @@ class QueryTraceTracker:
         self.failure_stage: str | None = None
         self.error_msg: str | None = None
         self._stage_starts: dict[str, float] = {}
+        self._chunks: dict[str, ChunkTraceRecord] = {}
         self._lock = threading.Lock()
 
     # ---- stage timing -----------------------------------------------------
@@ -178,6 +211,90 @@ class QueryTraceTracker:
 
     def record_no_results(self) -> None:
         self.status = "no_results"
+
+    # ---- chunk-level collection (for query_trace_chunk) -------------------
+
+    def _chunk(self, cid: str, file_path: str = "") -> ChunkTraceRecord:
+        rec = self._chunks.get(cid)
+        if rec is None:
+            rec = ChunkTraceRecord(chunk_id=cid)
+            self._chunks[cid] = rec
+        if file_path and not rec.file_path:
+            rec.file_path = file_path
+        return rec
+
+    def record_pre_rerank_chunks(self, chunks: list[dict]) -> None:
+        """Record the merged set entering rerank: sources + per-path ranks +
+        pre-rerank position. Each chunk may carry ``_tracking`` =
+        {sources: {dense,sparse,entity,relation}, orders: {dense,sparse,...}}
+        (set by _merge_all_chunks / _get_vector_context)."""
+        for i, c in enumerate(chunks, 1):
+            cid = c.get("chunk_id") or c.get("id")
+            if not cid:
+                continue
+            rec = self._chunk(str(cid), c.get("file_path", ""))
+            rec.pre_rerank_position = i
+            tracking = c.get("_tracking") or {}
+            sources = tracking.get("sources", {})
+            orders = tracking.get("orders", {})
+            srcs: list[str] = []
+            if sources.get("dense"):
+                srcs.append("dense")
+                rec.dense_rank = orders.get("dense")
+            if sources.get("sparse"):
+                srcs.append("sparse")
+                rec.sparse_rank = orders.get("sparse")
+            if sources.get("entity"):
+                srcs.append("entity")
+                rec.entity_rank = orders.get("entity")
+            if sources.get("relation"):
+                srcs.append("relation")
+                rec.relation_rank = orders.get("relation")
+            if srcs:
+                rec.sources = srcs
+
+    def record_post_rerank_chunks(self, reranked_chunks: list[dict]) -> None:
+        """Record rerank score + post-rerank rank for ALL chunks (reranked
+        order = score descending; 1 = top). Called before top_n slicing so
+        every chunk gets a rank/score, including those later dropped."""
+        for i, c in enumerate(reranked_chunks, 1):
+            cid = c.get("chunk_id") or c.get("id")
+            if not cid:
+                continue
+            rec = self._chunk(str(cid), c.get("file_path", ""))
+            rec.post_rerank_rank = i
+            score = c.get("rerank_score")
+            if score is not None:
+                rec.rerank_score = float(score)
+
+    def record_final_chunks(self, final_chunks: list[dict]) -> None:
+        """Mark chunks that survived truncation to the LLM context."""
+        for c in final_chunks:
+            cid = c.get("chunk_id") or c.get("id")
+            if not cid:
+                continue
+            rec = self._chunk(str(cid), c.get("file_path", ""))
+            rec.in_final_context = True
+
+    def to_chunk_ship_list(self) -> list[dict]:
+        """Chunk records for the query_trace_chunk table (no content)."""
+        return [
+            {
+                "trace_id": self.trace_id,
+                "chunk_id": r.chunk_id,
+                "file_path": r.file_path,
+                "sources": r.sources,
+                "dense_rank": r.dense_rank,
+                "sparse_rank": r.sparse_rank,
+                "entity_rank": r.entity_rank,
+                "relation_rank": r.relation_rank,
+                "pre_rerank_position": r.pre_rerank_position,
+                "post_rerank_rank": r.post_rerank_rank,
+                "rerank_score": r.rerank_score,
+                "in_final_context": r.in_final_context,
+            }
+            for r in self._chunks.values()
+        ]
 
     # ---- serialization ----------------------------------------------------
 

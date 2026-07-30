@@ -1499,3 +1499,90 @@ export const clearTraces = async (): Promise<{ status: string; deleted_count: nu
   const response = await axiosInstance.delete('/traces')
   return response.data
 }
+
+// ===== retrieval-path trace (PG-backed, public.query_trace*) =====
+
+export type TraceTurn = {
+  turn_id: string
+  original_query: string
+  latest_created_at: string
+  trace_count: number
+  chunk_count: number
+  source: string | null
+}
+
+export type QueryTraceRow = {
+  id: number
+  turn_id: string
+  trace_id: string
+  call_index: number | null
+  original_query: string
+  search_query: string
+  rewritten: boolean
+  mode: string
+  query_params: Record<string, any>
+  source: string
+  endpoint: string | null
+  rewrite_ms: number | null
+  retrieval_ms: number | null
+  rerank_ms: number | null
+  generation_ms: number | null
+  kg_embed_ms: number | null
+  kg_entity_ms: number | null
+  kg_relation_ms: number | null
+  kg_chunk_ms: number | null
+  chunks_retrieved: number | null
+  chunks_after_rerank: number | null
+  chunks_final: number | null
+  entities_count: number | null
+  relations_count: number | null
+  cache_hit: boolean
+  status: string
+  failure_stage: string | null
+  error_msg: string | null
+  created_at: string
+}
+
+export type QueryTraceChunk = {
+  id: number
+  trace_id: string
+  chunk_id: string
+  file_path: string | null
+  sources: string[]
+  dense_rank: number | null
+  sparse_rank: number | null
+  entity_rank: number | null
+  relation_rank: number | null
+  pre_rerank_position: number | null
+  post_rerank_rank: number | null
+  rerank_score: number | null
+  in_final_context: boolean
+  created_at: string
+}
+
+export type ChunkContent = {
+  chunk_id: string
+  content: string
+  file_path: string
+  chunk_order_index: number | null
+}
+
+export const listTraceTurns = async (limit = 50): Promise<TraceTurn[]> => {
+  const response = await axiosInstance.get('/query_trace/turns', { params: { limit } })
+  return response.data
+}
+
+export const getTurnTraces = async (turnId: string): Promise<QueryTraceRow[]> => {
+  const response = await axiosInstance.get(`/query_trace/turn/${encodeURIComponent(turnId)}`)
+  return response.data
+}
+
+export const getTraceChunks = async (traceId: string): Promise<QueryTraceChunk[]> => {
+  const response = await axiosInstance.get(`/query_trace/${encodeURIComponent(traceId)}/chunks`)
+  return response.data
+}
+
+export const getChunkContent = async (chunkId: string): Promise<ChunkContent> => {
+  const response = await axiosInstance.get(`/query_trace/chunk/${encodeURIComponent(chunkId)}`)
+  return response.data
+}

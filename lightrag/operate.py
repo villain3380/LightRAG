@@ -4716,7 +4716,7 @@ async def _get_vector_context(
     if _qt:
         _qt.set_chunks_retrieved(len(results))
 
-    # ── trace: record dense ranking (always, zero extra cost) ──
+    # ── trace: record dense ranking (opt-in, zero extra cost) ──
     if trace is not None:
         # Reuse the already-fetched results for dense ranking
         def _rank_results(raw: list, max_k: int) -> list[dict]:
@@ -4738,18 +4738,26 @@ async def _get_vector_context(
             results, search_top_k
         )
 
-        # Write dense hits to chunk_tracking (even when sparse is off)
-        if chunk_tracking is not None:
-            for i, r in enumerate(results):
-                cid = r.get("id") or r.get("chunk_id", "")
-                if cid:
-                    if cid not in chunk_tracking:
-                        chunk_tracking[cid] = {
-                            "sources": {}, "frequencies": {}, "orders": {}
-                        }
-                    chunk_tracking[cid]["sources"]["dense"] = True
-                    chunk_tracking[cid]["frequencies"]["dense"] = 1
-                    chunk_tracking[cid]["orders"]["dense"] = i + 1
+    # Write vector hits to chunk_tracking (unconditional - always-on trace needs
+    # source info for vector chunks). dense+sparse are一体 (向量检索 fused): tag
+    # both when sparse_enabled, so vector chunks show ['dense','sparse'] not just
+    # ['dense']. Covers naive (which has no _perform_kg_search unconditional block)
+    # and mix.
+    if chunk_tracking is not None:
+        for i, r in enumerate(results):
+            cid = r.get("id") or r.get("chunk_id", "")
+            if cid:
+                if cid not in chunk_tracking:
+                    chunk_tracking[cid] = {
+                        "sources": {}, "frequencies": {}, "orders": {}
+                    }
+                chunk_tracking[cid]["sources"]["dense"] = True
+                chunk_tracking[cid]["frequencies"]["dense"] = 1
+                chunk_tracking[cid]["orders"]["dense"] = i + 1
+                if sparse_enabled:
+                    chunk_tracking[cid]["sources"]["sparse"] = True
+                    chunk_tracking[cid]["frequencies"]["sparse"] = 1
+                    chunk_tracking[cid]["orders"]["sparse"] = i + 1
 
     # ── trace: sparse-enabled extra paths (A/B separate, fused) ──
     if trace is not None and sparse_enabled:
@@ -5510,6 +5518,10 @@ async def _build_context_str(
         chunk_token_limit=available_chunk_tokens,  # Pass dynamic limit
         progress_callback=progress_callback,
     )
+    # Mark final-context chunks (survived rerank + truncation) for trace
+    _qt = get_active_query_tracker()
+    if _qt:
+        _qt.record_final_chunks(truncated_chunks)
 
     # Generate reference list from truncated chunks using the new common function
     reference_list, truncated_chunks = generate_reference_list_from_chunks(
@@ -6503,6 +6515,14 @@ async def naive_query(
         f"Naive query token allocation - Total: {max_total_tokens}, SysPrompt: {sys_prompt_tokens}, Query: {query_tokens}, Buffer: {buffer_tokens}, Available for chunks: {available_chunk_tokens}"
     )
 
+    # Attach _tracking (sources + orders) from chunk_tracking so the trace's
+    # pre-rerank recording inside process_chunks_unified has source info for
+    # naive mode (KG's merged_chunks already carry _tracking from _merge_all_chunks).
+    for _c in chunks:
+        _cid = _c.get("chunk_id") or _c.get("id")
+        if _cid and _cid in chunk_tracking:
+            _c["_tracking"] = chunk_tracking[_cid]
+
     # Process chunks using unified processing with dynamic token limit
     processed_chunks = await process_chunks_unified(
         query=query,
@@ -6513,6 +6533,10 @@ async def naive_query(
         chunk_token_limit=available_chunk_tokens,  # Pass dynamic limit
         progress_callback=progress_callback,
     )
+    # Mark final-context chunks (survived rerank + truncation) for trace
+    _qt = get_active_query_tracker()
+    if _qt:
+        _qt.record_final_chunks(processed_chunks)
 
     # Generate reference list from processed chunks using the new common function
     reference_list, processed_chunks_with_ref_ids = generate_reference_list_from_chunks(
