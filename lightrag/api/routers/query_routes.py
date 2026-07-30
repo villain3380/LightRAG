@@ -4,12 +4,19 @@ This module contains all query-related routes for the LightRAG API.
 
 import asyncio
 import json
+import os
 import time
+import uuid
 from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends
 from lightrag.base import QueryParam
 from lightrag.api.utils_api import get_combined_auth_dependency, internal_server_error
 from lightrag.utils import logger
+from lightrag.query_tracker import (
+    QueryTraceTracker,
+    activate_query_tracker,
+    deactivate_query_tracker,
+)
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -140,6 +147,32 @@ class QueryRequest(BaseModel):
     stream: Optional[bool] = Field(
         default=None,
         description="If True, enables streaming output. Defaults to False for /query, True for /query/stream.",
+    )
+
+    # ── retrieval-path tracing (agent 透传；直查留空，路由层补默认) ──
+    turn_id: Optional[str] = Field(
+        default=None,
+        description="一次用户消息(agent turn)的 id；N 个并行/串行 /query 调用共享。直查留空。",
+    )
+    trace_id: Optional[str] = Field(
+        default=None,
+        description="单次 /query 调用唯一 id，关联 enable_trace 排序数据。留空则路由层生成。",
+    )
+    call_index: Optional[int] = Field(
+        default=None,
+        description="turn 内第几个 /query 调用(1,2,3...)，便于多路排序。",
+    )
+    original_query: Optional[str] = Field(
+        default=None,
+        description="用户原始 query。agent 改写时：original_query=原问题，query=改写后检索 query。直查留空(=query)。",
+    )
+    rewrite_ms: Optional[float] = Field(
+        default=None,
+        description="agent 从用户消息到发出 /query 工具调用的延迟(ms)。直查留空。",
+    )
+    source: Optional[str] = Field(
+        default=None,
+        description="调用方：direct(直查) / dp_server(agent) / mcp。留空按 direct。",
     )
 
     @field_validator("query", mode="after")
@@ -321,6 +354,73 @@ async def _enrich_references(
             ref_copy["order_index"] = order_index_map[cid]
         enriched.append(ref_copy)
     return enriched
+
+
+# ── query-trace shipping (fire-and-forget to data_platform) ──
+_dp_base_url = os.getenv("DATA_PLATFORM_URL", "http://127.0.0.1:9955").rstrip("/")
+_query_trace_enabled = os.getenv("QUERY_TRACE_ENABLED", "true").lower() == "true"
+_pending_trace_tasks: set = set()
+
+
+def _make_tracker(
+    request: QueryRequest, param: QueryParam, endpoint: str
+) -> QueryTraceTracker:
+    """Build a per-/query-call tracker from the request + resolved param.
+
+    Falls back sensibly for direct queries (no agent): trace_id/turn_id are
+    generated, original_query = the query, rewrite_ms = None, source = direct.
+    """
+    trace_id = param.trace_id or f"qt_{uuid.uuid4().hex[:12]}"
+    turn_id = param.turn_id or trace_id
+    original_query = param.original_query or request.query
+    query_params = {
+        "mode": param.mode,
+        "top_k": param.top_k,
+        "chunk_top_k": param.chunk_top_k,
+        "dense_weight": param.dense_weight,
+        "sparse_weight": param.sparse_weight,
+        "enable_rerank": param.enable_rerank,
+        "max_total_tokens": param.max_total_tokens,
+    }
+    return QueryTraceTracker(
+        turn_id=turn_id,
+        trace_id=trace_id,
+        call_index=param.call_index,
+        original_query=original_query,
+        search_query=request.query,
+        mode=param.mode,
+        source=param.source or "direct",
+        endpoint=endpoint,
+        rewrite_ms=param.rewrite_ms,
+        query_params=query_params,
+    )
+
+
+def _ship_query_trace(tracker: QueryTraceTracker) -> None:
+    """Fire-and-forget POST the trace record to data_platform.
+
+    Never blocks the query response and never raises. Best-effort: if
+    data_platform is unreachable the trace is dropped (logged at warning).
+    The task is tracked in ``_pending_trace_tasks`` to prevent GC.
+    """
+    if not _query_trace_enabled:
+        return
+    payload = tracker.to_ship_dict()
+
+    async def _post() -> None:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as cli:
+                await cli.post(f"{_dp_base_url}/query_trace/", json=payload)
+        except Exception as e:
+            logger.warning(f"failed to ship query_trace {tracker.trace_id}: {e}")
+
+    try:
+        task = asyncio.create_task(_post())
+        _pending_trace_tasks.add(task)
+        task.add_done_callback(_pending_trace_tasks.discard)
+    except RuntimeError:
+        pass  # no running loop (e.g. sync context) - drop silently
 
 
 def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
@@ -537,15 +637,25 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                 - 400: Invalid input parameters (e.g., query too short)
                 - 500: Internal processing error (e.g., LLM service unavailable)
         """
+        param = request.to_query_params(
+            False
+        )  # Ensure stream=False for non-streaming endpoint
+        # Force stream=False for /query endpoint regardless of include_references setting
+        param.stream = False
+        # Activate retrieval-path trace tracker (contextvar; deep calls in
+        # operate.py/utils.py fill retrieval/rerank/generation timings).
+        tracker = _make_tracker(request, param, "/query")
+        _trace_token = activate_query_tracker(tracker)
         try:
-            param = request.to_query_params(
-                False
-            )  # Ensure stream=False for non-streaming endpoint
-            # Force stream=False for /query endpoint regardless of include_references setting
-            param.stream = False
             # Unified approach: always use aquery_llm for both cases
             start_time = time.perf_counter()
             result = await rag.aquery_llm(request.query, param=param)
+            if (
+                isinstance(result, dict)
+                and result.get("status") == "failure"
+                and tracker.status == "success"
+            ):
+                tracker.record_failure("generation", result.get("message", ""))
             response_time = round(time.perf_counter() - start_time, 3)
 
             # Extract LLM response and references from unified result
@@ -581,8 +691,12 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                     response_time=response_time,
                 )
         except Exception as e:
+            tracker.record_failure("generation", str(e))
             logger.error(f"Error processing query: {str(e)}", exc_info=True)
             raise internal_server_error(e)
+        finally:
+            deactivate_query_tracker(_trace_token)
+            _ship_query_trace(tracker)
 
     def _build_stream_generator(
         *,
@@ -877,6 +991,8 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             Use streaming mode for real-time interfaces and non-streaming for batch processing.
         """
         try:
+            tracker = None
+            _trace_token = None
             # Use the stream parameter from the request, defaulting to True if not specified
             stream_mode = request.stream if request.stream is not None else True
             param = request.to_query_params(stream_mode)
@@ -891,6 +1007,14 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             # is False (default), use the original blocking path that preserves
             # the exact protocol order: references → response chunks → time.
             include_progress = request.include_progress or False
+
+            # Activate retrieval-path trace tracker. For the progress path the
+            # tracker ships in merged_generator's finally (after the background
+            # query_task settles); for the default path it ships below before
+            # returning. create_task copies the context, so the tracker stays
+            # visible inside query_task -> aquery_llm.
+            tracker = _make_tracker(request, param, "/query/stream")
+            _trace_token = activate_query_tracker(tracker)
 
             if include_progress:
                 progress_queue: asyncio.Queue = asyncio.Queue()
@@ -961,6 +1085,19 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                         async for line in stream_gen():
                             yield line
                     finally:
+                        # Ship the trace now that query_task has settled.
+                        if tracker is not None:
+                            if (
+                                query_task.done()
+                                and not query_task.cancelled()
+                                and query_task.exception() is not None
+                            ):
+                                tracker.record_failure(
+                                    "generation", str(query_task.exception())
+                                )
+                            if _trace_token is not None:
+                                deactivate_query_tracker(_trace_token)
+                            _ship_query_trace(tracker)
                         if not query_task.done():
                             query_task.cancel()
                             # Wait for cancellation cleanup so the task cannot
@@ -980,6 +1117,12 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             else:
                 # Default path: no progress events, original protocol order preserved.
                 result = await rag.aquery_llm(request.query, param=param)
+                if (
+                    isinstance(result, dict)
+                    and result.get("status") == "failure"
+                    and tracker.status == "success"
+                ):
+                    tracker.record_failure("generation", result.get("message", ""))
                 stream_gen = _build_stream_generator(
                     result=result,
                     include_references=request.include_references,
@@ -987,6 +1130,11 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                     include_response_time=False,
                     start_time=start_time,
                 )
+                # aquery_llm settled (retrieval + generation-iterator measured);
+                # ship the trace before returning. Stream consumption happens
+                # after return and is not part of the measured generation_ms.
+                deactivate_query_tracker(_trace_token)
+                _ship_query_trace(tracker)
 
                 return StreamingResponse(
                     stream_gen(),
@@ -999,6 +1147,11 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                     },
                 )
         except Exception as e:
+            if tracker is not None:
+                tracker.record_failure("generation", str(e))
+                if _trace_token is not None:
+                    deactivate_query_tracker(_trace_token)
+                _ship_query_trace(tracker)
             logger.error(f"Error processing streaming query: {str(e)}", exc_info=True)
             raise internal_server_error(e)
 

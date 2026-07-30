@@ -68,6 +68,7 @@ from lightrag.chunk_schema import (
     strip_internal_multimodal_markup_for_extraction,
 )
 from lightrag.prompt import PROMPTS, resolve_entity_extraction_prompt_profile
+from lightrag.query_tracker import get_active_query_tracker
 from lightrag.constants import (
     GRAPH_FIELD_SEP,
     DEFAULT_MAX_ENTITY_TOKENS,
@@ -4173,6 +4174,9 @@ async def kg_query(
 
     if context_result is None:
         logger.info("[kg_query] No query context could be built; returning no-result.")
+        _qt = get_active_query_tracker()
+        if _qt:
+            _qt.record_no_results()
         if trace is not None:
             try:
                 from lightrag.api.routers.trace_routes import save_trace
@@ -4181,6 +4185,17 @@ async def kg_query(
             except Exception:
                 logger.warning("failed to save retrieval trace", exc_info=True)
         return None
+
+    # Record recall counts (final chunks / entities / relations)
+    _qt = get_active_query_tracker()
+    if _qt:
+        try:
+            _data = context_result.raw_data.get("data", {})
+            _qt.chunks_final = len(_data.get("chunks", []) or [])
+            _qt.entities_count = len(_data.get("entities", []) or [])
+            _qt.relations_count = len(_data.get("relationships", []) or [])
+        except Exception:
+            pass
 
     # Populate trace with KG entities / relations + per-chunk hit_by
     if trace is not None:
@@ -4322,11 +4337,16 @@ async def kg_query(
         serialize_llm_cache_identity(llm_cache_identity),
     )
 
+    _qt = get_active_query_tracker()
+    if _qt:
+        _qt.start_stage("generation")
     cached_result = await handle_cache(
         hashing_kv, args_hash, user_query, query_param.mode, cache_type="query"
     )
 
     if cached_result is not None:
+        if _qt:
+            _qt.cache_hit = True
         cached_response, _ = cached_result  # Extract content, ignore timestamp
         logger.info(
             " == LLM cache == Query cache hit, using cached response as query result"
@@ -4342,6 +4362,8 @@ async def kg_query(
             enable_cot=True,
             stream=query_param.stream,
         )
+    if _qt:
+        _qt.end_stage("generation")
 
         if (
             hashing_kv
@@ -4688,6 +4710,12 @@ async def _get_vector_context(
             query, top_k=search_top_k, query_embedding=query_embedding
         )
 
+    # Record pre-rerank chunk count (first call wins; later entity/relation
+    # sub-retrievals inside _find_related_text_unit don't overwrite).
+    _qt = get_active_query_tracker()
+    if _qt:
+        _qt.set_chunks_retrieved(len(results))
+
     # ── trace: record dense ranking (always, zero extra cost) ──
     if trace is not None:
         # Reuse the already-fetched results for dense ranking
@@ -4833,6 +4861,7 @@ async def _perform_kg_search(
     Pure search logic that retrieves raw entities, relations, and vector chunks.
     No token truncation or formatting - just raw search results.
     """
+    _qt = get_active_query_tracker()
 
     # Initialize result containers
     local_entities = []
@@ -4884,9 +4913,13 @@ async def _perform_kg_search(
 
         if texts_to_embed:
             try:
+                if _qt:
+                    _qt.start_stage("kg_embed")
                 all_embeddings = await actual_embedding_func(
                     texts_to_embed, context="query", _priority=DEFAULT_QUERY_PRIORITY
                 )
+                if _qt:
+                    _qt.end_stage("kg_embed")
                 for i, purpose in enumerate(text_purposes):
                     if purpose == "query":
                         query_embedding = all_embeddings[i]
@@ -4906,6 +4939,8 @@ async def _perform_kg_search(
     if query_param.mode == "local" and len(ll_keywords) > 0:
         if progress_callback:
             await progress_callback(QueryProgress.RETRIEVING_ENTITIES)
+        if _qt:
+            _qt.start_stage("kg_entity")
         local_entities, local_relations = await _get_node_data(
             ll_keywords,
             knowledge_graph_inst,
@@ -4913,10 +4948,14 @@ async def _perform_kg_search(
             query_param,
             query_embedding=ll_embedding,
         )
+        if _qt:
+            _qt.end_stage("kg_entity")
 
     elif query_param.mode == "global" and len(hl_keywords) > 0:
         if progress_callback:
             await progress_callback(QueryProgress.RETRIEVING_RELATIONS)
+        if _qt:
+            _qt.start_stage("kg_relation")
         global_relations, global_entities = await _get_edge_data(
             hl_keywords,
             knowledge_graph_inst,
@@ -4924,11 +4963,15 @@ async def _perform_kg_search(
             query_param,
             query_embedding=hl_embedding,
         )
+        if _qt:
+            _qt.end_stage("kg_relation")
 
     else:  # hybrid or mix mode
         if len(ll_keywords) > 0:
             if progress_callback:
                 await progress_callback(QueryProgress.RETRIEVING_ENTITIES)
+            if _qt:
+                _qt.start_stage("kg_entity")
             local_entities, local_relations = await _get_node_data(
                 ll_keywords,
                 knowledge_graph_inst,
@@ -4936,9 +4979,13 @@ async def _perform_kg_search(
                 query_param,
                 query_embedding=ll_embedding,
             )
+            if _qt:
+                _qt.end_stage("kg_entity")
         if len(hl_keywords) > 0:
             if progress_callback:
                 await progress_callback(QueryProgress.RETRIEVING_RELATIONS)
+            if _qt:
+                _qt.start_stage("kg_relation")
             global_relations, global_entities = await _get_edge_data(
                 hl_keywords,
                 knowledge_graph_inst,
@@ -4946,11 +4993,15 @@ async def _perform_kg_search(
                 query_param,
                 query_embedding=hl_embedding,
             )
+            if _qt:
+                _qt.end_stage("kg_relation")
 
         # Get vector chunks for mix mode
         if query_param.mode == "mix" and chunks_vdb:
             if progress_callback:
                 await progress_callback(QueryProgress.RETRIEVING_CHUNKS)
+            if _qt:
+                _qt.start_stage("kg_chunk")
             vector_chunks = await _get_vector_context(
                 query,
                 chunks_vdb,
@@ -4959,6 +5010,8 @@ async def _perform_kg_search(
                 trace=trace,
                 chunk_tracking=chunk_tracking,
             )
+            if _qt:
+                _qt.end_stage("kg_chunk")
             # Track vector chunks with source metadata (accumulate, don't overwrite)
             for i, chunk in enumerate(vector_chunks):
                 chunk_id = chunk.get("chunk_id") or chunk.get("id")
@@ -5577,6 +5630,9 @@ async def _build_query_context(
         return None
 
     # Stage 1: Pure search
+    _qt = get_active_query_tracker()
+    if _qt:
+        _qt.start_stage("retrieval")
     search_result = await _perform_kg_search(
         query,
         ll_keywords,
@@ -5590,6 +5646,8 @@ async def _build_query_context(
         progress_callback=progress_callback,
         trace=trace,
     )
+    if _qt:
+        _qt.end_stage("retrieval")
 
     if not search_result["final_entities"] and not search_result["final_relations"]:
         if query_param.mode != "mix":
@@ -6383,15 +6441,23 @@ async def naive_query(
             "relations": None,
         }
 
+    _qt = get_active_query_tracker()
+    if _qt:
+        _qt.start_stage("retrieval")
     chunks = await _get_vector_context(
         query, chunks_vdb, query_param, None,
         trace=trace, chunk_tracking=chunk_tracking,
     )
+    if _qt:
+        _qt.end_stage("retrieval")
 
     if chunks is None or len(chunks) == 0:
         logger.info(
             "[naive_query] No relevant document chunks found; returning no-result."
         )
+        _qt = get_active_query_tracker()
+        if _qt:
+            _qt.record_no_results()
         return None
 
     # Backfill heading path before token truncation so it counts toward the budget
@@ -6491,6 +6557,9 @@ async def naive_query(
         }
 
     logger.info(f"Final context: {len(processed_chunks_with_ref_ids)} chunks")
+    _qt = get_active_query_tracker()
+    if _qt:
+        _qt.chunks_final = len(processed_chunks_with_ref_ids)
 
     # Build raw data structure for naive mode using processed chunks with reference IDs
     raw_data = convert_to_user_format(
@@ -6578,10 +6647,15 @@ async def naive_query(
         "\n<llm_identity>\n",
         serialize_llm_cache_identity(llm_cache_identity),
     )
+    _qt = get_active_query_tracker()
+    if _qt:
+        _qt.start_stage("generation")
     cached_result = await handle_cache(
         hashing_kv, args_hash, user_query, query_param.mode, cache_type="query"
     )
     if cached_result is not None:
+        if _qt:
+            _qt.cache_hit = True
         cached_response, _ = cached_result  # Extract content, ignore timestamp
         logger.info(
             " == LLM cache == Query cache hit, using cached response as query result"
@@ -6595,6 +6669,8 @@ async def naive_query(
             enable_cot=True,
             stream=query_param.stream,
         )
+    if _qt:
+        _qt.end_stage("generation")
 
         if (
             hashing_kv

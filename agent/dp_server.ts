@@ -20,6 +20,8 @@ import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
 import { streamSSE } from "hono/streaming";
 import pg from "pg";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 
 // deepseekProvider 读 DEEPSEEK_API_KEY，.env 用 LLM_BINDING_API_KEY，映射
 process.env.DEEPSEEK_API_KEY =
@@ -31,6 +33,18 @@ const LIGHTRAG_API = process.env.LIGHTRAG_API_URL || "http://localhost:9621";
 // === content 临时框 store（内存，编号 -> content 全文） ===
 const contentStore = new Map<number, string>();
 let contentIdCounter = 0;
+
+// === 检索路径追踪 ALS（把 original_query/turn_id/rewrite_ms 透传给 /query） ===
+// 每次 /api/chat 的 agent.prompt 包在 ALS.run 里；ragQueryTool.execute() 读出
+// ctx 算 rewrite_ms（= agent 思考到工具调用的延迟），生成 trace_id，连同
+// turn_id/call_index 一起 POST 给 /query，lightrag 落 shared.query_trace。
+type QueryTraceCtx = {
+  originalQuery: string;
+  startTime: number;
+  turnId: string;
+  callIndex: number;
+};
+const queryTraceALS = new AsyncLocalStorage<QueryTraceCtx>();
 
 // === agent 工具 ===
 
@@ -195,6 +209,17 @@ const ragQueryTool = {
     sparse_weight: Type.Optional(Type.Number({ description: "sparse 权重 0-1，默认 0.5" })),
   }),
   execute: async (_id: string, params: any) => {
+    // 从 ALS 取本次 turn 的追踪上下文，算 rewrite_ms + 生成 trace_id 透传给 /query
+    const ctx = queryTraceALS.getStore();
+    const traceFields: Record<string, unknown> = {};
+    if (ctx) {
+      traceFields.trace_id = `qt_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
+      traceFields.turn_id = ctx.turnId;
+      traceFields.call_index = ++ctx.callIndex;
+      traceFields.rewrite_ms = Date.now() - ctx.startTime;
+      traceFields.source = "dp_server";
+      traceFields.original_query = ctx.originalQuery;
+    }
     const r = await fetch(`${LIGHTRAG_API}/query`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -207,6 +232,7 @@ const ragQueryTool = {
         sparse_weight: params.sparse_weight,
         stream: false,
         response_type: "Multiple Paragraphs",
+        ...traceFields,
       }),
     });
     if (!r.ok) throw new Error(`rag_query failed: ${r.status} ${await r.text()}`);
@@ -383,6 +409,11 @@ tags：3-7 个标签。
 
 关键：ingest_insight 的 content_id 参数传编号，绝对不要传 content 全文。read_content 用来读 content 生成 summary。
 
+知识库检索（rag_query）：
+- 用户问知识库内容（文档/研报/资料，不是 insight）时，用 rag_query 检索 lightrag 知识库。
+- 调用时把用户问题改写成更可能检索到正确结果的 query：去掉口语化措辞，补上关键实体/术语，用文档里可能出现的表达。例如"那个重排模型延迟测了没"改写成"重排模型 推理延迟 测试结果"。
+- 简单事实用 naive；复杂关联用 hybrid/mix。为提高一次召回成功率，可一次发多个 rag_query（不同角度的 query + 不同 top_k）。
+
 待办事项（todo）：
 - 用户说"记一下/提醒我/待办"时，用 todo_create(title, priority, due_date, detail) 新建。priority 默认 P2，紧急用 P0/P1。
 - 用户问"我有什么待办/没完成的"时，用 todo_list(status='todo') 列出未完成。
@@ -518,7 +549,17 @@ app.post("/api/chat", async (c) => {
       }
     });
     try {
-      await agent.prompt(message);
+      // 包在 ALS.run 里：ragQueryTool.execute() 能读到 originalQuery/startTime/
+      // turnId，算 rewrite_ms + 生成 trace_id 透传给 /query（lightrag 落 query_trace）
+      await queryTraceALS.run(
+        {
+          originalQuery: message,
+          startTime: Date.now(),
+          turnId: `turn_${randomUUID().replace(/-/g, "").slice(0, 12)}`,
+          callIndex: 0,
+        },
+        () => agent.prompt(message),
+      );
     } catch (e: any) {
       await stream.writeSSE({ data: JSON.stringify({ type: "error", message: e.message }) });
     }

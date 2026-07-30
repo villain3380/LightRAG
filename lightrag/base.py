@@ -179,6 +179,33 @@ class QueryParam:
     containing citation information for the retrieved content.
     """
 
+    # ── retrieval-path tracing (filled by the agent / route layer) ──
+    # These do not affect retrieval; they are carried through so the query
+    # tracker can record original-vs-rewritten query, agent rewrite latency,
+    # and group multi-query calls under one user turn. See query_tracker.py.
+    turn_id: str = ""
+    """One per user message (agent turn); N parallel/sequential /query calls
+    in a turn share it. Empty for direct queries (route assigns = trace_id)."""
+
+    trace_id: str = ""
+    """Unique per /query call; correlates with enable_trace's ranking JSON
+    when both are on. Empty => route generates one."""
+
+    call_index: int | None = None
+    """1-based index of this /query call within its turn (for ordering)."""
+
+    original_query: str | None = None
+    """The user's original query. None / empty => same as the embedding query
+    (no agent rewrite). When the agent rewrote the query, this holds the raw
+    user input and ``query`` holds the rewritten search query."""
+
+    rewrite_ms: float | None = None
+    """Agent LLM latency from user message to the /query tool call. None for
+    direct queries that bypass the agent."""
+
+    source: str = "direct"
+    """Who issued the /query: 'direct' (HTTP), 'dp_server' (agent), 'mcp'."""
+
 
 @dataclass
 class StorageNameSpace(ABC):

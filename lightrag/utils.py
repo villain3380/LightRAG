@@ -57,6 +57,7 @@ from lightrag.constants import (
     DEFAULT_QUEUE_STATS_MIN_PUBLISH_INTERVAL,
 )
 from lightrag.resource_tracker import get_active_tracker
+from lightrag.query_tracker import get_active_query_tracker
 
 # Precompile regex pattern for JSON sanitization (module-level, compiled once)
 _SURROGATE_PATTERN = re.compile(r"[\uD800-\uDFFF\uFFFE\uFFFF]")
@@ -4985,6 +4986,9 @@ async def process_chunks_unified(
         if progress_callback:
             await progress_callback("reranking")
         rerank_top_k = query_param.chunk_top_k or len(unique_chunks)
+        _qt = get_active_query_tracker()
+        if _qt:
+            _qt.start_stage("rerank")
         unique_chunks = await apply_rerank_if_enabled(
             query=query,
             retrieved_docs=unique_chunks,
@@ -4992,6 +4996,9 @@ async def process_chunks_unified(
             enable_rerank=query_param.enable_rerank,
             top_n=rerank_top_k,
         )
+        if _qt:
+            _qt.end_stage("rerank")
+            _qt.set_chunks_after_rerank(len(unique_chunks))
 
     # 2. Filter by minimum rerank score if reranking is enabled
     if query_param.enable_rerank and unique_chunks:
