@@ -48,6 +48,7 @@ VALID_DOMAINS = {
     "technology",
     "policy",
     "daily_life",
+    "frontend_and_backend",
     "other",
 }
 

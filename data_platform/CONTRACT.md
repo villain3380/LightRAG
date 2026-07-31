@@ -93,7 +93,7 @@ async def get_insight_content(id: int) -> dict:
 
 ## 白名单
 - `VALID_GRADES = {"S2","S1","A","B","C","D"}`
-- `VALID_DOMAINS = {"financial_market", "financial_market/semiconductor", "financial_market/banking", "financial_market/real_estate", "technology", "policy", "daily_life", "other"}`
+- `VALID_DOMAINS = {"financial_market", "financial_market/semiconductor", "financial_market/banking", "financial_market/real_estate", "technology", "policy", "daily_life", "frontend_and_backend", "other"}`
 
 ## 文件结构
 ```

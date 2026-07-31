@@ -80,7 +80,7 @@ const ingestInsightTool = {
     iv_grade: Type.String({ description: "S2/S1/A/B/C/D" }),
     iv_desc: Type.Optional(Type.String()),
     domain: Type.String({
-      description: "financial_market / financial_market/semiconductor / technology / policy / daily_life / other",
+      description: "financial_market / financial_market/semiconductor / technology / policy / daily_life / frontend_and_backend / other",
     }),
     tags: Type.Optional(Type.Array(Type.String())),
     content_id: Type.Number({ description: "content 临时框编号（不是 content 全文！）" }),
@@ -402,7 +402,7 @@ const SYSTEM_PROMPT = `你是 woowoo 的中台知识库管家。
   重要：ingest_insight 传 content_id（编号），不要传 content 全文。工具会自动读 content 临时框。
 
 iv_grade：用户主动给的默认 S1。
-domain：financial_market / financial_market/semiconductor / technology / policy / daily_life / other
+domain：financial_market / financial_market/semiconductor / technology / policy / daily_life / frontend_and_backend / other
 tags：3-7 个标签。
 
 如果用户问问题（不是入库），用 search_insight 检索；要细节用 get_insight_content。

@@ -41,7 +41,7 @@ const ingestInsightTool = {
     iv_grade: Type.String({ description: "价值等级 S2/S1/A/B/C/D" }),
     iv_desc: Type.Optional(Type.String({ description: "等级原因" })),
     domain: Type.String({
-      description: "知识领域（financial_market / financial_market/semiconductor / technology / policy / daily_life / other）",
+      description: "知识领域（financial_market / financial_market/semiconductor / technology / policy / daily_life / frontend_and_backend / other）",
     }),
     tags: Type.Optional(Type.Array(Type.String(), { description: "标签数组" })),
     source_type: Type.Optional(Type.String()),
@@ -113,7 +113,7 @@ const SYSTEM_PROMPT = `你是 woowoo 的中台知识库管家。用户会给你�
    - summary：概括 ~100-200 字（精炼准确）
    - iv_grade：价值等级 S2/S1/A/B/C/D（用户主动给的默认 S2）
    - iv_desc：等级原因
-   - domain：知识领域（financial_market / financial_market/semiconductor / technology / policy / daily_life / other）
+   - domain：知识领域（financial_market / financial_market/semiconductor / technology / policy / daily_life / frontend_and_backend / other）
    - tags：3-7 个标签
    - source_url：来源链接（如果用户给了）
 2. 调用 ingest_insight 工具入库（调用前系统会让你确认参数）

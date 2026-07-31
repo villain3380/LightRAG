@@ -28,9 +28,17 @@ Configuration (via .env or env vars)
     LIGHTRAG_MCP_TIMEOUT  - HTTP request timeout in seconds (default: 120)
 
   MCP transport
-    LIGHTRAG_MCP_TRANSPORT - "stdio" (default) or "sse"
-    LIGHTRAG_MCP_HOST      - bind address for SSE (default: 127.0.0.1)
-    LIGHTRAG_MCP_PORT      - bind port for SSE (default: 8720)
+    LIGHTRAG_MCP_TRANSPORT - "stdio" (default), "sse", or "streamable-http".
+        "streamable-http" is the most robust for remote agents: it supports
+        reconnection (Last-Event-ID) and does not tie the session to a single
+        long-lived connection the way SSE does. "sse" is legacy and prone to
+        ClosedResourceError when the connection drops (see MCP_SSE_PING).
+    LIGHTRAG_MCP_HOST      - bind address for SSE / streamable-http (default: 127.0.0.1)
+    LIGHTRAG_MCP_PORT      - bind port for SSE / streamable-http (default: 8720)
+    MCP_SSE_PING           - SSE keepalive interval in seconds (default: 15).
+        sse_starlette sends no ping by default, so idle SSE connections get
+        reaped by proxies/networks and the session dies with ClosedResourceError.
+        Set to 0 to disable. Only effective in "sse" mode.
 
   Safety / context budget
     MCP_UPLOAD_ALLOW_DIRS - comma-separated allowlist of directories that
@@ -88,6 +96,25 @@ _UPLOAD_ALLOW_DIRS: list[Path] = [
 ]
 MAX_OUTPUT_CHARS = int(os.getenv("MCP_MAX_OUTPUT_CHARS", "50000"))
 
+# SSE keepalive: sse_starlette's EventSourceResponse sends no ping by default,
+# so idle SSE connections silently die and the client hits ClosedResourceError.
+# We patch in a periodic ping when running in SSE mode (see module docstring).
+SSE_PING_INTERVAL = float(os.getenv("MCP_SSE_PING", "15"))
+
+if MCP_TRANSPORT == "sse" and SSE_PING_INTERVAL > 0:
+    # Applied at import time so the patched __init__ is in place before FastMCP
+    # builds the SSE app. Mutates the class in place, so every EventSourceResponse
+    # (only used by the SSE transport) inherits the keepalive.
+    import sse_starlette as _sse_starlette
+
+    _orig_esr_init = _sse_starlette.EventSourceResponse.__init__
+
+    def _patched_esr_init(self, *args: Any, ping: float | None = None, **kwargs: Any) -> Any:
+        return _orig_esr_init(self, *args, ping=ping if ping is not None else SSE_PING_INTERVAL, **kwargs)
+
+    _sse_starlette.EventSourceResponse.__init__ = _patched_esr_init
+    logger.info("SSE keepalive ping enabled: %.1fs", SSE_PING_INTERVAL)
+
 # ── Type aliases (become JSON-Schema enums for the LLM) ────────────────
 # Using Literal instead of bare str lets FastMCP emit an enum schema, so the
 # model cannot pass an invalid value (e.g. priority="high" instead of "P1").
@@ -101,6 +128,7 @@ InsightDomain = Literal[
     "technology",
     "policy",
     "daily_life",
+    "frontend_and_backend",
     "other",
 ]
 TodoPriority = Literal["P0", "P1", "P2", "P3"]
@@ -1039,7 +1067,14 @@ def main() -> None:
         Remote agent usage. Starts an HTTP server on
         ``LIGHTRAG_MCP_HOST``:``LIGHTRAG_MCP_PORT`` that accepts MCP
         connections via Server-Sent Events. Other machines on the same
-        network (or VMs) can connect to this endpoint.
+        network (or VMs) can connect to this endpoint. Legacy: the session
+        is tied to one long-lived SSE stream and breaks if it drops; a
+        keepalive ping is injected via MCP_SSE_PING to mitigate idle drops.
+
+    ``streamable-http``
+        Recommended for remote agents. Single ``/mcp`` endpoint that
+        supports reconnection (Last-Event-ID), so transient drops do not
+        kill the session the way SSE does.
 
     The LightRAG REST API server must be running BEFORE this::
 
@@ -1048,11 +1083,12 @@ def main() -> None:
         # or for remote access:
         LIGHTRAG_MCP_TRANSPORT=sse LIGHTRAG_MCP_HOST=0.0.0.0 lightrag-mcp-server
     """
-    if MCP_TRANSPORT == "sse" and not _UPLOAD_ALLOW_DIRS:
+    if MCP_TRANSPORT in ("sse", "streamable-http") and not _UPLOAD_ALLOW_DIRS:
         logger.warning(
-            "SSE transport is enabled but MCP_UPLOAD_ALLOW_DIRS is unset - "
+            "Remote transport %r is enabled but MCP_UPLOAD_ALLOW_DIRS is unset - "
             "lightrag_upload_document can read any file on the host. Set "
-            "MCP_UPLOAD_ALLOW_DIRS to lock it down for remote exposure."
+            "MCP_UPLOAD_ALLOW_DIRS to lock it down for remote exposure.",
+            MCP_TRANSPORT,
         )
     logger.info(
         "LightRAG MCP server starting (transport=%s, API=%s)",
@@ -1064,6 +1100,12 @@ def main() -> None:
             "SSE endpoint: http://%s:%d/sse  |  messages: http://%s:%d/messages/",
             MCP_HOST,
             MCP_PORT,
+            MCP_HOST,
+            MCP_PORT,
+        )
+    elif MCP_TRANSPORT == "streamable-http":
+        logger.info(
+            "Streamable HTTP endpoint: http://%s:%d/mcp",
             MCP_HOST,
             MCP_PORT,
         )
