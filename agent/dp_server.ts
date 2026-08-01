@@ -19,6 +19,8 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
 import { streamSSE } from "hono/streaming";
+import { loadSession, persistMessage } from "./session-store.ts";
+import { maybeCompact } from "./compact.ts";
 import pg from "pg";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
@@ -421,20 +423,42 @@ tags：3-7 个标签。
 - 改待办内容/优先级/截止日用 todo_update(id, set)。
 - 用户用模糊复述找某条待办时（如"我上周说的测试重排模型延迟完成了"），先用 todo_search(query) 找到对应 todo，看 created_at/status 确认是哪条，再 todo_complete 或 todo_update。`;
 
-// === 建 Agent（单 Agent，多轮对话状态共享，先单用户） ===
+// === 建 Agent（per-session，多用户方向） ===
 const models = createModels();
 models.setProvider(deepseekProvider());
 const model = models.getModel("deepseek", "deepseek-v4-flash");
 if (!model) throw new Error("deepseek-v4-flash not found");
 
-const agent = new Agent({
-  initialState: {
-    systemPrompt: SYSTEM_PROMPT,
-    model,
-    tools: [readContentTool, ingestInsightTool, searchInsightTool, getContentTool, updateInsightTool, ragQueryTool, todoCreateTool, todoListTool, todoGetTool, todoUpdateTool, todoCompleteTool, todoSearchTool],
-  },
-  streamFunction: models.streamSimple.bind(models),
-});
+const AGENT_TOOLS = [
+  readContentTool, ingestInsightTool, searchInsightTool, getContentTool, updateInsightTool,
+  ragQueryTool, todoCreateTool, todoListTool, todoGetTool, todoUpdateTool, todoCompleteTool, todoSearchTool,
+];
+
+function createAgent(): Agent {
+  return new Agent({
+    initialState: { systemPrompt: SYSTEM_PROMPT, model, tools: AGENT_TOOLS },
+    streamFunction: models.streamSimple.bind(models),
+  });
+}
+
+// per-session Agent 缓存（FIFO 淘汰，防多用户下内存膨胀）
+const agents = new Map<number, Agent>();
+const MAX_AGENTS = parseInt(process.env.MAX_AGENTS || "64", 10);
+
+/** 取/建 session 的 Agent。冷启动时从 PG 加载历史(含 compaction 摘要)还原 _state.messages。 */
+async function getOrCreateAgent(sessionId: number): Promise<Agent> {
+  const hit = agents.get(sessionId);
+  if (hit) return hit;
+  const agent = createAgent();
+  const { messages, compactionSummary } = await loadSession(pgPool, sessionId);
+  agent.state.messages = compactionSummary ? [compactionSummary, ...messages] : messages;
+  if (agents.size >= MAX_AGENTS) {
+    const oldest = agents.keys().next().value;
+    if (oldest != null) agents.delete(oldest);
+  }
+  agents.set(sessionId, agent);
+  return agent;
+}
 
 // === Hono HTTP server ===
 const app = new Hono();
@@ -506,50 +530,37 @@ app.post("/api/content", async (c) => {
   return c.json({ content_id: id });
 });
 
-// agent 对话（SSE 流式 + 持久化到 agent_session）
+// agent 对话（SSE 流式 + 持久化到 agent_session；per-session Agent + 记忆层 compact）
 app.post("/api/chat", async (c) => {
   const { message, session_id } = await c.req.json<{ message: string; session_id?: number }>();
   if (!message) return c.json({ error: "message required" }, 400);
   if (!session_id) return c.json({ error: "session_id required" }, 400);
 
-  // 存 user 消息
-  await pgPool.query(
-    "INSERT INTO agent_session.message(session_id, role, content) VALUES($1, 'user', $2)",
-    [session_id, message]
-  );
-
-  let agentText = "";
+  const agent = await getOrCreateAgent(session_id);
+  // 记忆层 compact（turn 前；上下文超阈值才触发，否则 estimateContextTokens 秒返回）
+  await maybeCompact(agent, pgPool, session_id, models, model);
 
   return streamSSE(c, async (stream) => {
     const toolCallInfo = new Map<string, { name: string; args: any }>();
     const unsub = agent.subscribe(async (event: any) => {
       if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-        agentText += event.assistantMessageEvent.delta;
         await stream.writeSSE({ data: JSON.stringify({ type: "text", delta: event.assistantMessageEvent.delta }) });
+      } else if (event.type === "message_end") {
+        // 持久化全量 message（user/assistant/toolResult）+ message_json，挂 pgId 供后续 compact 用
+        const m = event.message;
+        const args = m.role === "toolResult" ? toolCallInfo.get(m.toolCallId)?.args : undefined;
+        await persistMessage(pgPool, session_id, m, args).catch((e) => console.warn("persist message failed:", e));
       } else if (event.type === "tool_execution_start") {
-        // 工具前文本存 assistant 消息（如果有）
-        if (agentText.trim()) {
-          await pgPool.query(
-            "INSERT INTO agent_session.message(session_id, role, content, display_content) VALUES($1, 'assistant', $2, $3)",
-            [session_id, agentText, agentText]
-          );
-          agentText = "";
-        }
         toolCallInfo.set(event.toolCallId, { name: event.toolName, args: event.args });
         await stream.writeSSE({ data: JSON.stringify({ type: "tool_call", id: event.toolCallId, name: event.toolName, args: event.args }) });
       } else if (event.type === "tool_execution_end") {
         const result = event.result?.details ?? event.result;
         const info = toolCallInfo.get(event.toolCallId);
-        // 存 tool_call 消息（name + args 从 start 事件取，end 事件只有 result）
-        await pgPool.query(
-          "INSERT INTO agent_session.message(session_id, role, tool_name, tool_args, tool_result) VALUES($1, 'tool_call', $2, $3, $4)",
-          [session_id, info?.name ?? event.toolName, JSON.stringify(info?.args), JSON.stringify(result)]
-        );
         await stream.writeSSE({ data: JSON.stringify({ type: "tool_result", id: event.toolCallId, name: info?.name ?? event.toolName, result }) });
       }
     });
     try {
-      // 包在 ALS.run 里：ragQueryTool.execute() 能读到 originalQuery/startTime/
+      // 包在 ALS.run 里：ragQueryTool.execute() 读 originalQuery/startTime/
       // turnId，算 rewrite_ms + 生成 trace_id 透传给 /query（lightrag 落 query_trace）
       await queryTraceALS.run(
         {
@@ -564,13 +575,6 @@ app.post("/api/chat", async (c) => {
       await stream.writeSSE({ data: JSON.stringify({ type: "error", message: e.message }) });
     }
     unsub();
-    // 存剩余 agentText（工具后文本）
-    if (agentText.trim()) {
-      await pgPool.query(
-        "INSERT INTO agent_session.message(session_id, role, content, display_content) VALUES($1, 'assistant', $2, $3)",
-        [session_id, agentText, agentText]
-      );
-    }
     // 更新 session.updated_at + title（首条消息摘要）
     await pgPool.query(
       "UPDATE agent_session.session SET updated_at=now(), title=COALESCE(NULLIF(title, ''), $2) WHERE id=$1",
