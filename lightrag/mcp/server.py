@@ -141,16 +141,6 @@ TodoStatus = Literal["todo", "in_progress", "done", "cancelled"]
 # discoverable. exclude_unset=True at call sites means only fields the LLM
 # actually provided are forwarded - unmentioned fields are left untouched,
 # and an explicitly-provided null still reaches the backend to clear a value.
-class InsightUpdateWhere(BaseModel):
-    id: int | None = None
-    ids: list[int] | None = None
-    title_contains: str | None = None
-    created_after: str | None = Field(None, description="YYYY-MM-DD")
-    created_before: str | None = Field(None, description="YYYY-MM-DD")
-    domain: InsightDomain | None = None
-    iv_grade: InsightGrade | None = None
-
-
 class InsightUpdateSet(BaseModel):
     title: str | None = None
     summary: str | None = None
@@ -185,15 +175,21 @@ mcp = FastMCP(
         "- lightrag_long_search: long-form answer (full response collected)\n"
         "- lightrag_insert_text: insert knowledge\n"
         "- lightrag_list_docs / knowledge_graph: browse docs / graph\n"
-        "- insight_search: search high-value info snippets\n"
+        "- insight_search: semantic search high-value info snippets\n"
+        "- insight_list: READ-ONLY list insights by date/domain/iv_grade (look up / get IDs)\n"
         "- insight_ingest: ingest insight\n"
         "- insight_get_content: get insight full content\n"
-        "- insight_update: batch update insights\n"
+        "- insight_update: ⚠️ WRITE tool, update insights by explicit IDs (dry_run first)\n"
         "- todo_create / todo_list / todo_get / todo_update / todo_complete: manage todo items\n"
         "- todo_search: find a todo by fuzzy paraphrase (semantic search title+detail)\n\n"
         "When to use which search:\n"
         "- Short, scattered, high-value info -> insight_search (market tips, trading rules, personal notes)\n"
-        "- Systematic, complex, multi-hop knowledge -> lightrag_search (industry analysis, technical docs, full reports)\n\n"
+        "- Systematic, complex, multi-hop knowledge -> lightrag_search (industry analysis, technical docs, full reports)\n"
+        "- Look up insights by date/domain or get IDs -> insight_list (read-only)\n\n"
+        "IMPORTANT - read vs write discipline:\n"
+        "- To retrieve, look up, or inspect information, ALWAYS use a READ tool: insight_list, insight_search, insight_get_content, lightrag_search, lightrag_search_data, lightrag_list_docs.\n"
+        "- NEVER use a WRITE tool (insight_update, insight_ingest, todo_create/update, lightrag_insert_text) to query or fetch information - write tools MUTATE data.\n"
+        "- insight_update requires explicit IDs (use insight_list first to get them) and defaults to dry_run=true; review the preview before actually updating.\n\n"
         "All destructive operations (delete, clear, cancel) are excluded for safety."
     ),
 )
@@ -468,7 +464,7 @@ async def lightrag_long_search(
 @mcp.tool(
     name="lightrag_insert_text",
     description=(
-        "Insert a single text document into the LightRAG knowledge base. "
+        "⚠️ WRITE: insert a single text document into the LightRAG knowledge base. "
         "The document will be chunked, embedded, and indexed automatically. "
         "Returns a track_id for monitoring processing progress."
     ),
@@ -534,8 +530,8 @@ async def lightrag_insert_texts(
 @mcp.tool(
     name="lightrag_upload_document",
     description=(
-        "Upload a file from the local filesystem into the LightRAG knowledge "
-        "base. The file is copied into the server's input directory and "
+        "⚠️ WRITE: upload a file from the local filesystem into the LightRAG "
+        "knowledge base. The file is copied into the server's input directory and "
         "processed (parsed, chunked, embedded, indexed). Supported formats "
         "include .txt, .md, .pdf, .docx, .pptx, .xlsx, .csv, .html, and more. "
         "When MCP_UPLOAD_ALLOW_DIRS is set, the path must be inside one of "
@@ -872,7 +868,7 @@ async def insight_search(
 
 @mcp.tool(
     name="insight_ingest",
-    description="Ingest a high-value insight (PG + Milvus). Fields: title, summary, content, iv_grade(S2/S1/A/B/C/D), domain, tags, source_url.",
+    description="⚠️ WRITE: ingest a high-value insight (PG + Milvus). Fields: title, summary, content, iv_grade(S2/S1/A/B/C/D), domain, tags, source_url.",
 )
 async def insight_ingest(
     title: str,
@@ -914,24 +910,63 @@ async def insight_get_content(id: int) -> str:
 
 
 @mcp.tool(
-    name="insight_update",
+    name="insight_list",
     description=(
-        "Batch update insights. Provide only the fields you want to change. "
-        "where filters: id/ids/title_contains/created_after/created_before/"
-        "domain/iv_grade. set fields: title/summary/iv_grade/iv_desc/domain/"
-        "source_title/source_url/source_type (omit a field to leave it "
-        "untouched; an explicit null still reaches the backend to clear a "
-        "supported value)."
+        "READ-ONLY: list insights by date/domain/iv_grade filters (structured, "
+        "no semantic search). Use this to look up insights, check ingest history, "
+        "or get IDs before calling insight_update. Returns brief rows (no full "
+        "content)."
     ),
 )
-async def insight_update(where: InsightUpdateWhere, set: InsightUpdateSet) -> str:
-    """Batch update insights. Only fields you provide are forwarded to the backend."""
+async def insight_list(
+    created_after: str | None = Field(None, description="YYYY-MM-DD, inclusive"),
+    created_before: str | None = Field(None, description="YYYY-MM-DD, exclusive upper bound"),
+    domain: InsightDomain | None = None,
+    iv_grade: InsightGrade | None = None,
+    limit: int = 50,
+) -> str:
+    """List insights by filter (read-only, ordered by created_at desc)."""
+    cli = _dp_client()
+    resp = await cli.get(
+        "/insight/list",
+        params={
+            "created_after": created_after,
+            "created_before": created_before,
+            "domain": domain,
+            "iv_grade": iv_grade,
+            "limit": limit,
+        },
+    )
+    resp.raise_for_status()
+    return _truncate(json.dumps(resp.json(), ensure_ascii=False))
+
+
+@mcp.tool(
+    name="insight_update",
+    description=(
+        "⚠️ WRITE/MUTATE tool - overwrites insight fields. NEVER use this to "
+        "look up or fetch information; use insight_list or insight_search to READ. "
+        "Updates insights by EXPLICIT IDs only (no condition-based bulk update). "
+        "ALWAYS pass dry_run=true first to preview affected rows; only call again "
+        "with dry_run=false after confirming the preview. Updates affecting >5 "
+        "rows also need confirm_large=true."
+    ),
+)
+async def insight_update(
+    ids: list[int],
+    set: InsightUpdateSet,
+    dry_run: bool = True,
+    confirm_large: bool = False,
+) -> str:
+    """Update insights by explicit IDs. dry_run=true (default) previews without changing."""
     cli = _dp_client()
     resp = await cli.put(
         "/insight/update",
         json={
-            "where": where.model_dump(exclude_unset=True),
+            "where": {"ids": ids},
             "set": set.model_dump(exclude_unset=True),
+            "dry_run": dry_run,
+            "confirm_large": confirm_large,
         },
     )
     resp.raise_for_status()
@@ -943,7 +978,7 @@ async def insight_update(where: InsightUpdateWhere, set: InsightUpdateSet) -> st
 
 @mcp.tool(
     name="todo_create",
-    description="Create a todo item. priority: P0/P1/P2/P3 (default P2). due_date: YYYY-MM-DD. Returns {id}.",
+    description="⚠️ WRITE: create a todo item. priority: P0/P1/P2/P3 (default P2). due_date: YYYY-MM-DD. Returns {id}.",
 )
 async def todo_create(
     title: str,
@@ -1010,7 +1045,7 @@ async def todo_get(id: int) -> str:
 @mcp.tool(
     name="todo_update",
     description=(
-        "Update a todo. Provide only the fields to change: title/detail/status"
+        "⚠️ WRITE/MUTATE: update a todo by ID. Provide only the fields to change: title/detail/status"
         "(todo/in_progress/done/cancelled)/priority(P0-P3)/due_date/tags/"
         "domain/sort_order/raw_meta. status='done' auto-fills completed_at; "
         "status='cancelled' = soft-delete. Omit a field to leave it unchanged; "

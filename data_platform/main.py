@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from .ingest import ingest_insight
 from .search import search_insight
-from .db import fetch_insight_content, update_insight_pg
+from .db import fetch_insight_content, update_insight_pg, list_insights_pg
 from .db_emfetch import em_fetch_ingest_pg
 from .db_todo import insert_todo_pg, list_todo_pg, get_todo_pg, update_todo_pg, todo_search_pg
 
@@ -57,16 +57,32 @@ async def get_content_api(insight_id: int):
     return row if row else {"error": "not found", "id": insight_id}
 
 
+@app.get("/insight/list")
+async def list_insight_api(
+    created_after: str | None = None,
+    created_before: str | None = None,
+    domain: str | None = None,
+    iv_grade: str | None = None,
+    limit: int = 50,
+):
+    """纯读：按日期/domain/iv_grade 列出 insight 摘要（查入库历史/取 ID 用）。"""
+    return await list_insights_pg(created_after, created_before, domain, iv_grade, limit)
+
+
 class UpdateInsightIn(BaseModel):
     where: dict = {}
     set: dict = {}
+    dry_run: bool = False
+    confirm_large: bool = False
 
 
 @app.put("/insight/update")
 async def update_insight_api(req: UpdateInsightIn):
-    """批量更新 insight。where 条件 + set 字段（白名单）。"""
+    """批量更新 insight（带 dry-run + affected_rows 熔断 + 审计）。"""
     try:
-        return await update_insight_pg(req.where, req.set)
+        return await update_insight_pg(
+            req.where, req.set, dry_run=req.dry_run, confirm_large=req.confirm_large
+        )
     except ValueError as e:
         return {"error": str(e)}
 

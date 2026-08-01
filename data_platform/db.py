@@ -6,6 +6,7 @@ import asyncio
 import asyncpg
 import json
 import os
+from datetime import date as _date
 
 _pool: asyncpg.Pool | None = None
 _pool_loop: asyncio.AbstractEventLoop | None = None
@@ -114,54 +115,148 @@ UPDATE_ALLOWED_FIELDS = {
     "iv_grade", "iv_desc", "domain", "title", "summary",
 }
 
+# 熔断阈值：单次 update 影响行数超过此值且未显式 confirm_large 时拒绝
+UPDATE_MAX_AFFECTED = 5
 
-async def update_insight_pg(where: dict, set_fields: dict) -> dict:
-    """批量更新 shared.insight。返回 {updated: N}。
+
+def _build_where(where: dict) -> tuple[list, list]:
+    """构造 WHERE 子句的参数和片段，$N 从 1 起编号。返回 (args, parts)。"""
+    args: list = []
+    parts: list = []
+
+    def add(value, fmt: str) -> None:
+        args.append(value)
+        parts.append(fmt.format(len(args)))
+
+    if where.get("id"):
+        add(where["id"], "id = ${}")
+    if where.get("ids"):
+        add(where["ids"], "id = ANY(${})")
+    if where.get("title_contains"):
+        add(f"%{where['title_contains']}%", "title ILIKE ${}")
+    if where.get("created_after"):
+        add(_date.fromisoformat(where["created_after"]), "created_at >= ${}")
+    if where.get("created_before"):
+        add(_date.fromisoformat(where["created_before"]), "created_at < ${}")
+    if where.get("domain"):
+        add(where["domain"], "domain = ${}")
+    if where.get("iv_grade"):
+        add(where["iv_grade"], "iv_grade = ${}")
+    return args, parts
+
+
+async def list_insights_pg(
+    created_after: str | None = None,
+    created_before: str | None = None,
+    domain: str | None = None,
+    iv_grade: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """按条件列出 insight 摘要（纯读，不含 content 全文）。
+
+    agent 获取信息 / 查入库历史 / 取 ID 应该用这个，不要用 update。
+    """
+    where_args, where_parts = _build_where(
+        {
+            "created_after": created_after,
+            "created_before": created_before,
+            "domain": domain,
+            "iv_grade": iv_grade,
+        }
+    )
+    limit = max(1, min(int(limit), 200))
+    sql = (
+        "SELECT id, title, summary, content_tokens, iv_grade, iv_desc, "
+        "domain, tags, source_type, source_url, source_title, created_at, updated_at "
+        "FROM shared.insight"
+    )
+    if where_parts:
+        sql += " WHERE " + " AND ".join(where_parts)
+    where_args.append(limit)
+    sql += f" ORDER BY created_at DESC LIMIT ${len(where_args)}"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *where_args)
+    return [dict(r) for r in rows]
+
+
+async def update_insight_pg(
+    where: dict,
+    set_fields: dict,
+    *,
+    dry_run: bool = False,
+    confirm_large: bool = False,
+    max_affected: int = UPDATE_MAX_AFFECTED,
+) -> dict:
+    """批量更新 shared.insight（dry-run + affected_rows 熔断 + 审计触发器）。
+
+    流程：先 SELECT 受影响 id -> 熔断/dry_run 判断 -> 按 id 精确 UPDATE
+    （UPDATE 由 trg_insight_audit 自动把 OLD.* 写进 ops.insight_update_log）。
 
     Args:
-        where: 条件（created_after/created_before YYYY-MM-DD, domain, iv_grade）
+        where: 条件（id/ids/title_contains/created_after/created_before/domain/iv_grade）
         set_fields: 更新字段（必须在 UPDATE_ALLOWED_FIELDS 白名单内）
+        dry_run: True 只预览受影响行，不落库
+        confirm_large: 影响行数 > max_affected 时必须显式传 True 才执行
+        max_affected: 熔断阈值
+
+    Returns:
+        dry_run: {"dry_run": True, "count": N, "ids": [...]}
+        熔断拒绝: {"error": "...", "count": N, "ids": [...]}
+        成功: {"updated": N, "ids": [...]}
     """
-    args: list = []
+    set_args: list = []
     set_parts: list = []
     for k, v in set_fields.items():
         if k not in UPDATE_ALLOWED_FIELDS:
             raise ValueError(f"不允许更新字段: {k}（允许: {UPDATE_ALLOWED_FIELDS}）")
-        args.append(v)
-        set_parts.append(f"{k} = ${len(args)}")
+        set_args.append(v)
+        set_parts.append(f"{k} = ${len(set_args)}")
     if not set_parts:
         raise ValueError("没有可更新的字段")
 
-    where_parts: list = []
-    if where.get("id"):
-        args.append(where["id"])
-        where_parts.append(f"id = ${len(args)}")
-    if where.get("ids"):
-        args.append(where["ids"])
-        where_parts.append(f"id = ANY(${len(args)})")
-    if where.get("title_contains"):
-        args.append(f"%{where['title_contains']}%")
-        where_parts.append(f"title ILIKE ${len(args)}")
-    from datetime import date as _date
-    if where.get("created_after"):
-        args.append(_date.fromisoformat(where["created_after"]))
-        where_parts.append(f"created_at >= ${len(args)}")
-    if where.get("created_before"):
-        args.append(_date.fromisoformat(where["created_before"]))
-        where_parts.append(f"created_at < ${len(args)}")
-    if where.get("domain"):
-        args.append(where["domain"])
-        where_parts.append(f"domain = ${len(args)}")
-    if where.get("iv_grade"):
-        args.append(where["iv_grade"])
-        where_parts.append(f"iv_grade = ${len(args)}")
-
-    sql = f"UPDATE shared.insight SET {', '.join(set_parts)}, updated_at = now()"
-    if where_parts:
-        sql += f" WHERE {' AND '.join(where_parts)}"
+    where_args, where_parts = _build_where(where)
+    if not where_parts:
+        raise ValueError("拒绝无条件更新：where 必须至少包含一个筛选条件")
 
     pool = await get_pool()
     async with pool.acquire() as conn:
-        result = await conn.execute(sql, *args)
-    count = int(result.split()[-1]) if result else 0
-    return {"updated": count}
+        async with conn.transaction():
+            # 1. 先取受影响 id（预览 + 熔断计数 + UPDATE 精确目标，快照一致）
+            select_sql = (
+                "SELECT id FROM shared.insight WHERE "
+                + " AND ".join(where_parts)
+                + " ORDER BY id"
+            )
+            rows = await conn.fetch(select_sql, *where_args)
+            ids = [r["id"] for r in rows]
+            count = len(ids)
+
+            if count == 0:
+                return {"updated": 0, "ids": []}
+
+            # 2. 熔断
+            if count > max_affected and not confirm_large:
+                return {
+                    "error": (
+                        f"影响 {count} 行（> 熔断阈值 {max_affected}）。"
+                        f"确认无误后传 confirm_large=true 重试，或缩小范围；"
+                        f"dry_run=true 可先预览。"
+                    ),
+                    "count": count,
+                    "ids": ids,
+                }
+
+            # 3. dry-run
+            if dry_run:
+                return {"dry_run": True, "count": count, "ids": ids}
+
+            # 4. 按预览的 id 精确更新（审计触发器记 OLD.*）
+            update_args = list(set_args) + [ids]
+            sql = (
+                f"UPDATE shared.insight SET {', '.join(set_parts)}, updated_at = now() "
+                f"WHERE id = ANY(${len(set_args) + 1})"
+            )
+            result = await conn.execute(sql, *update_args)
+    updated = int(result.split()[-1]) if result else 0
+    return {"updated": updated, "ids": ids}
