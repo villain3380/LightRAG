@@ -74,7 +74,7 @@ const ingestInsightTool = {
   name: "ingest_insight",
   label: "入库 insight",
   description:
-    "入库 insight。传 content_id（不是 content 全文），工具自动读 content 临时框。" +
+    "⚠️ 写操作：入库 insight。传 content_id（不是 content 全文），工具自动读 content 临时框。" +
     "参数：title, summary, iv_grade(S2/S1/A/B/C/D), iv_desc, domain, tags, content_id, source_type, source_url, source_title",
   parameters: Type.Object({
     title: Type.String({ description: "短标题 ≤30 字" }),
@@ -150,23 +150,45 @@ const getContentTool = {
   },
 };
 
-/** 批量更新 insight */
+/** 列出 insight（纯读，按日期/domain/iv_grade 过滤） */
+const listInsightTool = {
+  name: "list_insight",
+  label: "列出 insight",
+  description:
+    "READ-ONLY：按日期/domain/iv_grade 列出 insight 摘要（结构化过滤，非语义搜索）。" +
+    "查入库历史、按日期范围找 insight、或获取 id 给 update_insight 用。返回摘要列表（不含原文）。" +
+    "参数：created_after(YYYY-MM-DD 含), created_before(YYYY-MM-DD 不含), domain, iv_grade, limit(默认50)",
+  parameters: Type.Object({
+    created_after: Type.Optional(Type.String({ description: "YYYY-MM-DD，含此日期之后" })),
+    created_before: Type.Optional(Type.String({ description: "YYYY-MM-DD，不含此日期" })),
+    domain: Type.Optional(Type.String()),
+    iv_grade: Type.Optional(Type.String({ description: "S2/S1/A/B/C/D" })),
+    limit: Type.Optional(Type.Number({ description: "默认50，最大200" })),
+  }),
+  execute: async (_id: string, params: any) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v != null) qs.set(k, String(v));
+    const r = await fetch(`${DATA_PLATFORM}/insight/list?${qs}`);
+    const result = await r.json();
+    if (!r.ok) throw new Error(`list insight failed: ${JSON.stringify(result)}`);
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+      details: { count: Array.isArray(result) ? result.length : 0 },
+    };
+  },
+};
+
+/** 更新 insight（按显式 id 列表，dry-run 优先） */
 const updateInsightTool = {
   name: "update_insight",
   label: "更新 insight",
   description:
-    "批量更新 insight。where 条件（created_after: YYYY-MM-DD, created_before, domain, iv_grade）+ set 字段（source_title, source_url, source_type, iv_grade, iv_desc, domain, title, summary）。" +
-    "例如：把今天入库的 insight 的 source_title 改成'大锅饭评房记'，where={created_after:'2026-07-27'}, set={source_title:'大锅饭评房记'}",
+    "⚠️ 写操作：覆盖 insight 字段。禁止用它查询/检索信息（查询用 list_insight / search_insight）。" +
+    "只按显式 id 列表更新（不支持 created_after 等条件批量）。" +
+    "必须先用 dry_run=true 预览受影响行，确认后再用 dry_run=false 真改。" +
+    "影响 >5 行还需 confirm_large=true。set 字段：source_title, source_url, source_type, iv_grade, iv_desc, domain, title, summary。",
   parameters: Type.Object({
-    where: Type.Object({
-      id: Type.Optional(Type.Number({ description: "按 id 精确匹配单个" })),
-      ids: Type.Optional(Type.Array(Type.Number(), { description: "按 id 列表匹配多个" })),
-      title_contains: Type.Optional(Type.String({ description: "标题模糊匹配（ILIKE）" })),
-      created_after: Type.Optional(Type.String({ description: "YYYY-MM-DD，查此日期之后入库的" })),
-      created_before: Type.Optional(Type.String({ description: "YYYY-MM-DD" })),
-      domain: Type.Optional(Type.String()),
-      iv_grade: Type.Optional(Type.String()),
-    }),
+    ids: Type.Array(Type.Number(), { description: "要更新的 insight id 列表（先用 list_insight 查到）" }),
     set: Type.Object({
       source_title: Type.Optional(Type.Union([Type.String(), Type.Null()])),
       source_url: Type.Optional(Type.Union([Type.String(), Type.Null()])),
@@ -177,17 +199,21 @@ const updateInsightTool = {
       title: Type.Optional(Type.Union([Type.String(), Type.Null()])),
       summary: Type.Optional(Type.Union([Type.String(), Type.Null()])),
     }),
+    dry_run: Type.Optional(Type.Boolean({ description: "true=只预览不落库（默认 true）" })),
+    confirm_large: Type.Optional(Type.Boolean({ description: "影响>5行时必须传 true" })),
   }),
   execute: async (_id: string, params: any) => {
+    const { ids, set, dry_run = true, confirm_large = false } = params;
     const r = await fetch(`${DATA_PLATFORM}/insight/update`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params),
+      body: JSON.stringify({ where: { ids }, set, dry_run, confirm_large }),
     });
     const result = await r.json();
     if (!r.ok) throw new Error(`update failed: ${JSON.stringify(result)}`);
+    const tag = dry_run ? "预览（未落库）" : "更新完成";
     return {
-      content: [{ type: "text" as const, text: `更新完成：${JSON.stringify(result)}` }],
+      content: [{ type: "text" as const, text: `${tag}：${JSON.stringify(result)}` }],
       details: result,
     };
   },
@@ -252,7 +278,7 @@ const ragQueryTool = {
 const todoCreateTool = {
   name: "todo_create",
   label: "新建待办",
-  description: "新建一条待办事项。priority: P0/P1/P2/P3(默认P2), due_date: YYYY-MM-DD。返回 {id}。",
+  description: "⚠️ 写操作：新建一条待办事项。priority: P0/P1/P2/P3(默认P2), due_date: YYYY-MM-DD。返回 {id}。",
   parameters: Type.Object({
     title: Type.String({ description: "标题" }),
     priority: Type.Optional(Type.String({ description: "P0/P1/P2/P3, 默认 P2" })),
@@ -321,7 +347,7 @@ const todoGetTool = {
 const todoUpdateTool = {
   name: "todo_update",
   label: "更新待办",
-  description: "更新待办。set: {title/detail/status/priority/due_date/tags/domain/sort_order}。status='done'自动填completed_at;status='cancelled'软删除。",
+  description: "⚠️ 写操作：更新待办。set: {title/detail/status/priority/due_date/tags/domain/sort_order}。status='done'自动填completed_at;status='cancelled'软删除。",
   parameters: Type.Object({
     id: Type.Number(),
     set: Type.Object({
@@ -354,7 +380,7 @@ const todoUpdateTool = {
 const todoCompleteTool = {
   name: "todo_complete",
   label: "完成待办",
-  description: "按 id 标记待办完成(trigger 自动填 completed_at)。",
+  description: "⚠️ 写操作：按 id 标记待办完成(trigger 自动填 completed_at)。",
   parameters: Type.Object({ id: Type.Number() }),
   execute: async (_id: string, params: any) => {
     const r = await fetch(`${DATA_PLATFORM}/todo/${params.id}/complete`, { method: "PUT" });
@@ -407,7 +433,12 @@ iv_grade：用户主动给的默认 S1。
 domain：financial_market / financial_market/semiconductor / technology / policy / daily_life / frontend_and_backend / other
 tags：3-7 个标签。
 
-如果用户问问题（不是入库），用 search_insight 检索；要细节用 get_insight_content。
+如果用户问问题（不是入库），用 search_insight 语义检索；要细节用 get_insight_content。
+按日期/范围查入库历史或找 insight 的 id，用 list_insight（纯读，支持 created_after/created_before/domain/iv_grade）。
+
+⚠️ 读写纪律（重要）：
+- 获取/查询信息只能用读工具：list_insight、search_insight、get_insight_content、rag_query、todo_list、todo_get。绝不能用 update_insight 等写工具去"查"——写工具会改数据。
+- update_insight 只按显式 id 列表更新（先用 list_insight 查到 id），且默认 dry_run=true 只预览；确认预览无误后再 dry_run=false 真改。
 
 关键：ingest_insight 的 content_id 参数传编号，绝对不要传 content 全文。read_content 用来读 content 生成 summary。
 
@@ -430,7 +461,7 @@ const model = models.getModel("deepseek", "deepseek-v4-flash");
 if (!model) throw new Error("deepseek-v4-flash not found");
 
 const AGENT_TOOLS = [
-  readContentTool, ingestInsightTool, searchInsightTool, getContentTool, updateInsightTool,
+  readContentTool, ingestInsightTool, searchInsightTool, listInsightTool, getContentTool, updateInsightTool,
   ragQueryTool, todoCreateTool, todoListTool, todoGetTool, todoUpdateTool, todoCompleteTool, todoSearchTool,
 ];
 
