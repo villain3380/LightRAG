@@ -101,3 +101,4 @@ memory-bank
 woo_doc/
 lightrag/evaluation/dataset/
 agent/node_modules
+db_migration_output/
