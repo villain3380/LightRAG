@@ -129,6 +129,7 @@ InsightDomain = Literal[
     "policy",
     "daily_life",
     "frontend_and_backend",
+    "data_structures_and_algorithms",
     "other",
 ]
 TodoPriority = Literal["P0", "P1", "P2", "P3"]

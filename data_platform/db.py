@@ -50,6 +50,7 @@ VALID_DOMAINS = {
     "policy",
     "daily_life",
     "frontend_and_backend",
+    "data_structures_and_algorithms",
     "other",
 }
 
