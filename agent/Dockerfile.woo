@@ -1,0 +1,33 @@
+# lightrag-woo dp_server 镜像(Node/TS Agent 服务,:9956)
+# build context 为 agent/ 目录:
+#   docker build -f agent/Dockerfile.woo -t dp-server-woo:latest agent/
+# 或由 docker-compose-woo.yml 的 dp_server 服务自动构建。
+#
+# 运行方式与宿主机一致:node --import tsx dp_server.ts
+# (tsx 在 devDependencies,npm ci 默认安装)
+#
+# 环境变量(compose 注入):
+#   LIGHTRAG_API_URL / DATA_PLATFORM_URL  - 指向 lightrag / data_platform 服务名
+#   AGENT_SESSION_PG_HOST / _PORT / _DB   - PG 连接(容器内为 postgres 服务)
+#   AGENT_SESSION_PWD / LLM keys          - 由 .env (compose env_file) 提供
+#
+# 注意(GFW 环境):FROM 依赖 docker.io 的 node:22-slim,构建前需经镜像源预拉并 retag:
+#   sudo docker pull docker.m.daocloud.io/library/node:22-slim \
+#     && sudo docker tag docker.m.daocloud.io/library/node:22-slim node:22-slim
+
+FROM node:22-slim
+
+WORKDIR /app
+
+# engines 要求 node >=22.19.0,node:22-slim 最新 22.x 满足
+
+# 先装依赖(仅 package 文件变化才失效此层)
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# 再拷源码(agent/.dockerignore 已排除 node_modules/test/docs)
+COPY . .
+
+EXPOSE 9956
+
+CMD ["node", "--import", "tsx", "dp_server.ts"]

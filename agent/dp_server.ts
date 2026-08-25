@@ -507,12 +507,14 @@ app.use(
 app.get("/api/health", (c) => c.json({ status: "ok" }));
 
 // === PG 连接（agent_session 持久化） ===
+// host/port 可用环境变量覆盖（docker compose 里指向 postgres 服务），
+// 默认 localhost 保持宿主机直跑的行为不变。
 const pgPool = new pg.Pool({
-  host: "localhost",
-  port: 5432,
+  host: process.env.AGENT_SESSION_PG_HOST || "localhost",
+  port: parseInt(process.env.AGENT_SESSION_PG_PORT || "5432", 10),
   user: "agent_session_writer",
   password: process.env.AGENT_SESSION_PWD || "asw_2026",
-  database: "rag",
+  database: process.env.AGENT_SESSION_PG_DB || "rag",
 });
 
 // === 会话端点 ===

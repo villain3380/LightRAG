@@ -1,0 +1,7 @@
+# dp_server 镜像 build context(agent/)排除规则
+# 依赖在容器内 npm ci 重装,宿主 node_modules 不进镜像
+node_modules
+test
+docs
+dist
+*.md

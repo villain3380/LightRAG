@@ -1,0 +1,284 @@
+# lightrag-woo 全栈一键部署:基础设施 + 四个应用服务
+#
+# 用法:
+#   docker compose -f docker-compose-woo.yml up -d          # 基础设施 + lightrag + data_platform + dp_server
+#   docker compose -f docker-compose-woo.yml up -d --profile mcp   # 额外起 MCP server(:8720)
+#   docker compose -f docker-compose-woo.yml logs -f lightrag       # 看日志
+#   docker compose -f docker-compose-woo.yml down          # 停止(数据卷保留)
+#
+# 与宿主机开发模式(woo_doc/常用命令.md)的关系:
+#   - 本文件不动 docker-compose-milvus.yml,基础设施定义照抄(external volumes 共用同一份数据)
+#   - MinerU 仍在宿主机 :8000(重依赖不打包),容器经 host.docker.internal 访问
+#   - WebUI 无单独容器:Dockerfile.woo 已把前端构建进 lightrag/api/webui,
+#     浏览器访问 http://localhost:9950 即生产版页面(替代 dev 模式的 4173)
+#   - 端口与宿主机模式一致:9950/9955/9956/(8720)
+#
+# 前置条件:
+#   1. .env 在项目根(DashScope key、DB 密码等,与宿主机模式共用一份)
+#   2. 基础镜像经镜像源预拉(docker.io 被墙):
+#      sudo docker pull docker.m.daocloud.io/library/python:3.12-slim-bookworm \
+#        && sudo docker tag docker.m.daocloud.io/library/python:3.12-slim-bookworm python:3.12-slim-bookworm
+#      sudo docker pull docker.m.daocloud.io/oven/bun:1 \
+#        && sudo docker tag docker.m.daocloud.io/oven/bun:1 oven/bun:1
+#      sudo docker pull docker.m.daocloud.io/library/node:22-slim \
+#        && sudo docker tag docker.m.daocloud.io/library/node:22-slim node:22-slim
+#   3. (可选,入库需要)宿主机 MinerU 已跑在 :8000
+#
+# 首次构建:
+#   docker compose -f docker-compose-woo.yml up -d --build
+
+services:
+  # ── 应用层(lightrag-woo 定制) ──────────────────────────────────
+
+  lightrag:
+    # lightrag-server(:9950)+ 生产版 WebUI;镜像同时供 data_platform / mcp 服务复用
+    build:
+      context: .
+      dockerfile: Dockerfile.woo
+    image: lightrag-woo:latest
+    ports:
+      - "127.0.0.1:${PORT:-9950}:9950"   # 浏览器访问这里即是 WebUI + API
+    volumes:
+      - ./data/rag_storage:/app/data/rag_storage
+      - ./inputs:/app/data/inputs            # 宿主机已有文档/__parsed__ 中间产物
+      - ./data/prompts:/app/data/prompts
+      - ./.env:/app/.env:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # 容器访问宿主机 MinerU(:8000)
+    environment:
+      # 容器内固定路径
+      HOST: "0.0.0.0"
+      PORT: "9950"
+      WORKING_DIR: "/app/data/rag_storage"
+      INPUT_DIR: "/app/data/inputs"
+      PROMPT_DIR: "/app/data/prompts"
+      # 用服务名覆盖 .env 里的 localhost(compose environment 优先级高于容器内 .env)
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      NEO4J_URI: "neo4j://neo4j:7687"
+      MILVUS_URI: "http://milvus:19530"
+      MINERU_LOCAL_ENDPOINT: "http://host.docker.internal:8000"
+      # EMBEDDING_*/LLM_*/存储选择等其余配置全部由 .env 提供(云端 DashScope + PG/Milvus/Neo4j)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9950/health', timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    restart: unless-stopped
+
+  data_platform:
+    # 数据中台(:9955):insight/todo/行情入库与检索,复用 lightrag-woo 镜像
+    image: lightrag-woo:latest
+    command: python -m uvicorn data_platform.main:app --host 0.0.0.0 --port 9955
+    ports:
+      - "127.0.0.1:9955:9955"
+    volumes:
+      - ./.env:/app/.env:ro
+    environment:
+      # data_platform 用 DP_* 前缀变量(data_platform/db.py / milvus_client.py)
+      DP_PG_HOST: "postgres"
+      DP_PG_PORT: "5432"
+      DP_PG_DB: "rag"
+      DP_MILVUS_URI: "http://milvus:19530"
+      DP_MILVUS_DB: "lightrag"
+      # 密码(INSIGHT_WRITER_PWD/TODO_WRITER_PWD 等)由挂载的 .env 提供
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9955/health', timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dp_server:
+    # Agent 服务(:9956):TS agent,连 lightrag/data_platform/PG(agent_session)
+    build:
+      context: ./agent
+      dockerfile: Dockerfile.woo
+    image: dp-server-woo:latest
+    ports:
+      - "127.0.0.1:9956:9956"
+    env_file:
+      - .env   # LLM key / AGENT_SESSION_PWD 等(environment 覆盖优先级更高)
+    environment:
+      # 容器内经 docker 网络互访,localhost 不通
+      LIGHTRAG_API_URL: "http://lightrag:9950"
+      DATA_PLATFORM_URL: "http://data_platform:9955"
+      AGENT_SESSION_PG_HOST: "postgres"
+      AGENT_SESSION_PG_PORT: "5432"
+      AGENT_SESSION_PG_DB: "rag"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:9956/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    depends_on:
+      lightrag:
+        condition: service_healthy
+      data_platform:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mcp:
+    # MCP server(:8720,可选):默认不启动,--profile mcp 开启
+    image: lightrag-woo:latest
+    command: lightrag-mcp-server
+    ports:
+      - "127.0.0.1:8720:8720"
+    profiles:
+      - mcp
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./inputs:/app/data/inputs          # lightrag_upload_document 工具的上传目录
+    environment:
+      LIGHTRAG_MCP_TRANSPORT: "sse"
+      LIGHTRAG_MCP_HOST: "0.0.0.0"
+      LIGHTRAG_MCP_PORT: "8720"
+      LIGHTRAG_API_BASE_URL: "http://lightrag:9950"
+      DATA_PLATFORM_URL: "http://data_platform:9955"
+      # 远程传输必须锁定上传目录(server.py 启动时也会警告)
+      MCP_UPLOAD_ALLOW_DIRS: "/app/data/inputs"
+    depends_on:
+      lightrag:
+        condition: service_healthy
+      data_platform:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── 基础设施层(与 docker-compose-milvus.yml 保持一致,external volumes 共用数据) ──
+
+  postgres:
+    # KV + DocStatus + query_trace + agent_session + 数据中台各 schema
+    image: postgres:17
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag}"]
+      interval: 5s
+      timeout: 3s
+      retries: 120
+      start_period: 10s
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-rag}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-rag}"
+      POSTGRES_DB: "${POSTGRES_DATABASE:-rag}"
+
+  neo4j:
+    image: neo4j:5-community
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 120
+      start_period: 30s
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: "${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set in .env}"
+      NEO4J_dbms_default__database: "neo4j"
+
+  milvus:
+    # CPU 版 standalone;如有 GPU 可改 milvusdb/milvus:v2.6.11-gpu
+    image: milvusdb/milvus:v2.6.11
+    ports:
+      - "127.0.0.1:19530:19530"
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+      MINIO_ACCESS_KEY_ID: "${MINIO_ACCESS_KEY_ID:?must be set in .env}"
+      MINIO_SECRET_ACCESS_KEY: "${MINIO_SECRET_ACCESS_KEY:?must be set in .env}"
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9091/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 120
+      start_period: 30s
+    depends_on:
+      milvus-etcd:
+        condition: service_healthy
+      milvus-minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  milvus-etcd:
+    image: quay.io/coreos/etcd:v3.5.25
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - milvus-etcd_data:/etcd
+    command: >
+      etcd
+      -advertise-client-urls=http://0.0.0.0:2379
+      -listen-client-urls=http://0.0.0.0:2379
+      -data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 20s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  milvus-minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ACCESS_KEY_ID:?must be set in .env}"
+      MINIO_ROOT_PASSWORD: "${MINIO_SECRET_ACCESS_KEY:?must be set in .env}"
+    volumes:
+      - milvus-minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+# 复用已有数据的 external volumes(与 docker-compose-milvus.yml 同名)。
+# 代价:lightrag-woo 与另一个 lightrag 项目共用同一份数据,两个项目不能同时 up。
+volumes:
+  postgres_data:
+    external: true
+    name: lightrag_postgres_data
+  neo4j_data:
+    external: true
+    name: lightrag_neo4j_data
+  milvus_data:
+    external: true
+    name: lightrag_milvus_data
+  milvus-etcd_data:
+    external: true
+    name: lightrag_milvus-etcd_data
+  milvus-minio_data:
+    external: true
+    name: lightrag_milvus-minio_data
